@@ -1,9 +1,10 @@
-# TurboCAT 2026 — engine preview (v0.1.2)
+# TurboCAT 4 — engine preview (4.0.0-alpha.3)
 
 Author: David Hill
 
-The scanning engine for TurboCAT 2026, the modern revival of TurboCAT /
-TurboCAT-Pro (1994–1996). This preview has no window yet; it runs from the
+The scanning engine for TurboCAT 4, the modern revival of TurboCAT /
+TurboCAT-Pro (1994–1996). Version 4 continues the original numbering: TurboCAT 3 was
+on the Amiga Shopper issue 52 coverdisk in August 1995. This preview has no window yet; it runs from the
 terminal. The desktop window comes next.
 
 ## What it reads
@@ -19,6 +20,10 @@ terminal. The desktop window comes next.
 | Amiga folders | Folders used as emulator hard drives (detected by `S/Startup-Sequence` etc.) |
 
 Archives and images inside other images are opened too (up to 3 levels).
+
+## Changes in 4.0.0-alpha.3
+
+- Renamed from TurboCAT 2026 to TurboCAT 4; the command is now `python -m turbocat` and the default catalogue `~/turbocat.db`
 
 ## Changes in 0.1.2
 
@@ -47,8 +52,8 @@ Unzip into your home folder, then in a terminal:
 sudo apt install python3-venv xdms
 python3 -m venv ~/turbocat-env
 ~/turbocat-env/bin/pip install amitools lhafile
-cd ~/TurboCAT2026
-alias tc='~/turbocat-env/bin/python -m turbocat2026'
+cd ~/TurboCAT4
+alias tc='~/turbocat-env/bin/python -m turbocat'
 ```
 
 ## Use
@@ -64,9 +69,9 @@ tc export disks disks.csv  # numbered disk list (spreadsheet)
 tc export csv files.csv    # every file (spreadsheet)
 ```
 
-Run the commands from inside the `TurboCAT2026` folder.
+Run the commands from inside the `TurboCAT4` folder.
 
-The catalogue is stored in `~/turbocat2026.db` (change with `--db FILE`).
+The catalogue is stored in `~/turbocat.db` (change with `--db FILE`).
 
 ## Roadmap
 

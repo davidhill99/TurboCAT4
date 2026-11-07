@@ -1,4 +1,4 @@
-"""Build a synthetic Amiga test collection for TurboCAT 2026.
+"""Build a synthetic Amiga test collection for TurboCAT 4.
 
 Creates OFS/FFS disks, an LHA WHDLoad pack, archives inside disks, an RDB hard
 disk image, a bare-partition HDF, a damaged disk, a virus-style bootblock, an

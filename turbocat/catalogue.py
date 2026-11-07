@@ -1,4 +1,4 @@
-"""The TurboCAT 2026 catalogue: a single SQLite database file."""
+"""The TurboCAT 4 catalogue: a single SQLite database file."""
 
 import json
 import sqlite3

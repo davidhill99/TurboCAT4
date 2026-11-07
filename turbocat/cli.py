@@ -1,14 +1,14 @@
-"""Command-line front end for the TurboCAT 2026 engine.
+"""Command-line front end for the TurboCAT 4 engine.
 
-    python -m turbocat2026 scan FOLDER...      scan images, archives and Amiga folders
-    python -m turbocat2026 search TEXT         find files, disks, WHDLoad games, disk text
-    python -m turbocat2026 show NUMBER         full details of one catalogued item
-    python -m turbocat2026 dups                duplicate images and files
-    python -m turbocat2026 sets                multi-disk sets: missing or mixed-up disks
-    python -m turbocat2026 problems            damaged images and suspicious bootblocks
-    python -m turbocat2026 stats               catalogue totals
-    python -m turbocat2026 export csv FILE     export every file to a spreadsheet (CSV)
-    python -m turbocat2026 export disks FILE   export the disk list (Gotek / Amiberry friendly)
+    python -m turbocat scan FOLDER...      scan images, archives and Amiga folders
+    python -m turbocat search TEXT         find files, disks, WHDLoad games, disk text
+    python -m turbocat show NUMBER         full details of one catalogued item
+    python -m turbocat dups                duplicate images and files
+    python -m turbocat sets                multi-disk sets: missing or mixed-up disks
+    python -m turbocat problems            damaged images and suspicious bootblocks
+    python -m turbocat stats               catalogue totals
+    python -m turbocat export csv FILE     export every file to a spreadsheet (CSV)
+    python -m turbocat export disks FILE   export the disk list (Gotek / Amiberry friendly)
 """
 
 import argparse
@@ -24,7 +24,7 @@ from .catalogue import Catalogue
 from .scanner import scan
 
 STATUS_WORD = {"ok": "OK", "warning": "Warning", "error": "Problem"}
-DEFAULT_DB = os.path.join(os.path.expanduser("~"), "turbocat2026.db")
+DEFAULT_DB = os.path.join(os.path.expanduser("~"), "turbocat.db")
 
 
 def _j(s, default):
@@ -237,7 +237,7 @@ def cmd_export(cat, a):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="turbocat2026", description=f"{APP_NAME} {VERSION}")
+    ap = argparse.ArgumentParser(prog="turbocat", description=f"{APP_NAME} {VERSION}")
     ap.add_argument("--db", default=DEFAULT_DB, help="catalogue file (default: %(default)s)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("scan"); p.add_argument("paths", nargs="+")
