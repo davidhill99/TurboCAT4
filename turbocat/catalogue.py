@@ -118,6 +118,58 @@ class Catalogue:
             (like, like, like, like, like, limit)).fetchall()
         return media, files
 
+    def top_ids(self):
+        """Map every media id to the id of the top-level item that holds it."""
+        parent = {r["id"]: r["parent_id"]
+                  for r in self.db.execute("SELECT id, parent_id FROM media")}
+        top = {}
+        for mid in parent:
+            t = mid
+            while parent.get(t):
+                t = parent[t]
+            top[mid] = t
+        return top
+
+    def search_items(self, text, max_files=5000):
+        """Search everything and group the hits by top-level item.
+
+        Returns {top_id: {"why": [short reasons], "files": n, "first_file": path}};
+        "files" counts matching files inside the item (counting stops at max_files).
+        """
+        like = f"%{text}%"
+        low = text.lower()
+        top = self.top_ids()
+        hits = {}
+
+        def hit(mid):
+            return hits.setdefault(top.get(mid, mid), {"why": [], "files": 0, "first_file": ""})
+
+        for m in self.db.execute(
+                """SELECT * FROM media WHERE source LIKE ? OR inner_path LIKE ? OR volume LIKE ?
+                   OR whd_name LIKE ? OR text LIKE ?""", (like,) * 5):
+            h = hit(m["id"])
+            if low in (m["whd_name"] or "").lower():
+                h["why"].append(f"WHDLoad game {m['whd_name']}")
+            elif low in (m["volume"] or "").lower():
+                h["why"].append(f"volume {m['volume']}")
+            elif low in (m["inner_path"] or "").lower():
+                h["why"].append(f"inside: {m['inner_path']}")
+            elif low not in m["source"].lower():
+                try:
+                    texts = json.loads(m["text"] or "[]")
+                except ValueError:
+                    texts = []
+                found = next((t for t in texts if low in t.lower()), "")
+                h["why"].append(f'disk text "{found[:60]}"' if found else "disk text")
+        for f in self.db.execute(
+                """SELECT media_id, path FROM files WHERE name LIKE ? OR comment LIKE ?
+                   ORDER BY path LIMIT ?""", (like, like, max_files)):
+            h = hit(f["media_id"])
+            h["files"] += 1
+            if not h["first_file"]:
+                h["first_file"] = f["path"]
+        return hits
+
     def media_by_id(self, mid):
         return self.db.execute("SELECT * FROM media WHERE id=?", (mid,)).fetchone()
 

@@ -9,6 +9,7 @@
     python -m turbocat stats               catalogue totals
     python -m turbocat export csv FILE     export every file to a spreadsheet (CSV)
     python -m turbocat export disks FILE   export the disk list (Gotek / Amiberry friendly)
+    python -m turbocat window              open the desktop window (needs PySide6)
 """
 
 import argparse
@@ -252,7 +253,16 @@ def main(argv=None):
     p = sub.add_parser("sets"); p.add_argument("--all", action="store_true", help="list complete sets too")
     sub.add_parser("stats")
     p = sub.add_parser("export"); p.add_argument("what", choices=["csv", "disks"]); p.add_argument("file")
+    sub.add_parser("window", help="open the desktop window")
     a = ap.parse_args(argv)
+    if a.cmd == "window":
+        try:
+            from .gui import run
+        except ImportError as e:
+            print(f"The window needs PySide6 ({e}). Install it with:\n"
+                  "  ~/turbocat-env/bin/pip install PySide6-Essentials")
+            return 1
+        return run(a.db)
     cat = Catalogue(a.db)
     {"scan": cmd_scan, "search": cmd_search, "show": cmd_show, "dups": cmd_dups,
      "problems": cmd_problems, "stats": cmd_stats, "export": cmd_export,

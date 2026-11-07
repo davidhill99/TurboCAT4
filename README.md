@@ -4,8 +4,8 @@ Author: David Hill
 
 The scanning engine for TurboCAT 4, the modern revival of TurboCAT /
 TurboCAT-Pro (1994–1996). Version 4 continues the original numbering: TurboCAT 3 was
-on the Amiga Shopper issue 52 coverdisk in August 1995. This preview has no window yet; it runs from the
-terminal. The desktop window comes next.
+on the Amiga Shopper issue 52 coverdisk in August 1995. This preview runs from the terminal, with a first
+desktop window (catalogue list and search) under way.
 
 ## What it reads
 
@@ -52,6 +52,7 @@ Unzip into your home folder, then in a terminal:
 sudo apt install python3-venv xdms
 python3 -m venv ~/turbocat-env
 ~/turbocat-env/bin/pip install amitools lhafile
+~/turbocat-env/bin/pip install PySide6-Essentials   # for the desktop window
 cd ~/TurboCAT4
 alias tc='~/turbocat-env/bin/python -m turbocat'
 ```
@@ -67,6 +68,7 @@ tc sets                    # multi-disk sets: missing or mixed-up disks
 tc problems                # damaged disks and suspicious bootblocks
 tc export disks disks.csv  # numbered disk list (spreadsheet)
 tc export csv files.csv    # every file (spreadsheet)
+tc window                  # desktop window: the catalogue with search (Ctrl F)
 ```
 
 Run the commands from inside the `TurboCAT4` folder.
