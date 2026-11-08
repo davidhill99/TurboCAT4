@@ -32,6 +32,12 @@ Archives and images inside other images are opened too (up to 3 levels).
 - Filter chips above the list: All items, Problems, Warnings, Duplicates, WHDLoad games, Non-DOS disks, Hard drives and Empty, with counts that follow the search
 - Long titles and facts in the details panel are no longer cut off
 - **Copy to Gotek stick** (header button, details panel or Ctrl+G): copies the selected disks to a USB stick or any folder as plain ADF files, unpacked from ZIP, LHA, DMS or ADZ. Names them for FlashFloppy, or DSKA0000.ADF style for stock Gotek / HxC firmware. Hard drives, WHDLoad games, blank disks and IPF images are left out with the reason. Select several items with Ctrl or Shift
+- **Pictures:** each disk's own Workbench icon is shown in the list, and the best picture on the disk (a title screen where there is one) at the top of the details panel. Classic, Workbench 1.3 and GlowIcon icons and IFF ILBM/PBM pictures (including HAM and EHB) are decoded. Found in the background when the window opens and after each scan; kept in ~/.cache/turbocat/pictures
+- **Find pictures online:** for disks with no picture of their own, a title screen is fetched from the libretro-thumbnails collection (as used by RetroArch) when the title matches exactly. These belong to the games' publishers and are kept locally for personal use; asked once before the first lookup
+- List columns can be resized by dragging the dividers in the header (double-click one to fit the column); the widths are remembered
+- **Games** filter chip: shows only game disks. An item counts as a game when it has a WHDLoad slave, its name or folder says game ("PD Games Volume", "(Game)", "(demo-playable)"), it has a trainer, its TOSEC name has a games publisher, its title is in the libretro game list, or (not for PD disks) it boots its own loader; the other disks of a set follow. Utilities, music, coverdisks and demos are not counted on the weaker signs. The details panel says why each one counts
+- Games show their picture (title screen) in the list; other items show their own Workbench icon. Score tables and strips of graphics are no longer picked as a disk's picture, and a game with no picture offers a Find pictures online link
+- **Music** filter chip and player: music modules on disks and in archives are recognised by their contents (ProTracker and relatives, OctaMED, FastTracker 2, Scream Tracker 3, Impulse Tracker, Oktalyzer; AHX listed but not played), including ProTracker modules built into music-disk programs. The details panel lists an item's tunes; double-click one to play it. A player bar (pause, next, stop) keeps playing while you browse. Sound is rendered by libopenmpt with Amiga-style filtering and played through Qt Multimedia, so it works on Linux, Windows and macOS (see Setup)
 - ZIP archives are read (TOSEC packs each disk in a .zip); an archive holding a single disk is listed as that disk
 - Overdumped ADFs (TOSEC "[o]", extra tracks past the end of the disk) are read normally with a note, instead of being reported as a problem and mis-read as high density
 
@@ -63,13 +69,27 @@ Archives and images inside other images are opened too (up to 3 levels).
 Unzip into your home folder, then in a terminal:
 
 ```
-sudo apt install python3-venv xdms
+sudo apt install python3-venv xdms libopenmpt0
 python3 -m venv ~/turbocat-env
 ~/turbocat-env/bin/pip install amitools lhafile
 ~/turbocat-env/bin/pip install PySide6-Essentials   # for the desktop window
+~/turbocat-env/bin/pip install PySide6-Addons       # to play music modules (Qt Multimedia)
 cd ~/TurboCAT4
 alias tc='~/turbocat-env/bin/python -m turbocat'
 ```
+
+The PySide6 packages must be the same version (`pip list | grep PySide6`).
+
+**Music playback** needs two things; everything else works without them, and the window says
+what is missing when you press play:
+
+- **libopenmpt**, which turns modules into sound. Most Linux desktops already have it (VLC uses
+  it); otherwise `sudo apt install libopenmpt0` (`dnf install libopenmpt` on Fedora,
+  `pacman -S libopenmpt` on Arch). On Windows put `libopenmpt.dll` from
+  [lib.openmpt.org](https://lib.openmpt.org/libopenmpt/download/) in `turbocat/lib/`; on macOS
+  `brew install libopenmpt`.
+- **Qt Multimedia** (`PySide6-Addons`, above), which plays the sound on Linux (PipeWire,
+  PulseAudio or ALSA), Windows and macOS.
 
 ## Use
 
@@ -101,6 +121,9 @@ The catalogue is stored in `~/turbocat.db` (change with `--db FILE`).
 
 **Version 1.1**
 - TurboView reads new ADFs on the Amiga itself into a top-up file until the next desktop scan
+
+**Ideas being considered**
+- *Music Modules disks for the Gotek* (a preference): copying modules, rather than whole disks, adds them to a "Music Modules" ADF on the stick, created if needed, instead of using a whole disk per tune. When it is full TurboCAT offers "Music Modules 2", and so on. Thoughts so far: write OFS/FFS with amitools; Amiga-friendly names ("mod.title", at most 30 characters); skip tunes already on the disk; warn about modules too big for a floppy (offer an HD disk) and formats a stock Amiga can't play easily (XM, IT, S3M); tunes found inside music-disk programs become ordinary modules; possibly a bootable disk with a free module player
 
 **Later**
 - PFS3/SFS partitions · extended (MFM) ADFs · virus signature database · Windows, Raspberry Pi and Mac packages

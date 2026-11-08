@@ -139,7 +139,7 @@ def read_dos_blkdev(blkdev, res: ContainerResult, validate=True):
 
 # ---------------------------------------------------------------- ADF
 
-def read_adf(data: bytes, kind="adf") -> ContainerResult:
+def read_adf(data: bytes, kind="adf", validate=True) -> ContainerResult:
     from amitools.fs.blkdev.ADFBlockDevice import ADFBlockDevice
     res = ContainerResult(kind)
     if len(data) < 1024:
@@ -186,7 +186,7 @@ def read_adf(data: bytes, kind="adf") -> ContainerResult:
         try:
             blk = ADFBlockDevice(None, read_only=True, fobj=io.BytesIO(data), hd=hd)
             blk.open()
-            read_dos_blkdev(blk, res)
+            read_dos_blkdev(blk, res, validate)
             return res
         except Exception as ex:
             if res.boot["bootable"]:

@@ -8,18 +8,21 @@ Run with:  python -m turbocat window   (add --db FILE for another catalogue)
 
 import json
 import os
+import re
 import shutil
 import sys
 import time
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import (QAbstractTableModel, QItemSelectionModel, QModelIndex, QRectF, QSize, Qt, QThread, QTimer,
+from PySide6.QtCore import (QAbstractTableModel, QIODevice, QItemSelectionModel, QModelIndex,
+                            QObject, QRectF, QSize, Qt, QThread, QTimer,
                             QUrl, Signal)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog,
-                               QFrame, QGridLayout, QListWidget, QListWidgetItem, QRadioButton,
+                               QFrame, QGridLayout, QListWidget, QListWidgetItem, QMessageBox,
+                               QRadioButton,
                                QButtonGroup, QHBoxLayout, QProgressBar,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QPushButton,
                                QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
@@ -28,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 from . import APP_NAME, VERSION
 from .bootblock import best_title
 from .catalogue import Catalogue
-from . import gotek
+from . import games, gotek, music, pictures
 from .scanner import rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
@@ -73,6 +76,8 @@ STATUS = {"ok": ("OK", "ok", "ok-tint", None),
 # Filter chips above the list: key, label, icon, test for an item.
 FILTERS = [
     ("all", "All items", None, lambda it: True),
+    ("games", "Games", "game", lambda it: bool(it.game)),
+    ("music", "Music", "music", lambda it: it.music > 0),
     ("problems", "Problems", "problem", lambda it: it.status == "error"),
     ("warnings", "Warnings", "warning", lambda it: it.status == "warning"),
     ("dups", "Duplicates", "duplicate", lambda it: it.dup),
@@ -130,6 +135,30 @@ def icon(name, size):
     return _pix_cache[key]
 
 
+_thumb_cache = {}
+
+
+def thumb(path, w, h, upscale=True):
+    """A picture from the cache folder, fitted into w x h (pixel art kept crisp when enlarged)."""
+    key = (path, w, h, upscale)
+    if key not in _thumb_cache:
+        pm = QPixmap(path)
+        if pm.isNull():
+            _thumb_cache[key] = None
+        else:
+            if not upscale and pm.width() <= w and pm.height() <= h:
+                out = pm
+            else:
+                big = pm.width() < w and pm.height() < h
+                out = pm.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.FastTransformation if big
+                                else Qt.TransformationMode.SmoothTransformation)
+            _thumb_cache[key] = out
+            if len(_thumb_cache) > 3000:
+                _thumb_cache.clear()
+    return _thumb_cache[key]
+
+
 # ---------------------------------------------------------------- data
 
 @dataclass
@@ -150,12 +179,22 @@ class Item:
     dup_shas: frozenset = frozenset()
     non_dos: bool = False
     hard_drive: bool = False
+    thumb_icon: str = ""        # the disk's own Workbench icon (PNG path)
+    pic: str = ""               # best picture: on the disk, or found online
+    pic_from: str = ""
+    pic_origin: str = ""
+    game: str = ""              # why it counts as a game ("" if it doesn't)
+    key: str = ""               # pictures / music key
+    music: int = 0              # music modules found inside
     search_blob: str = field(default="", repr=False)
 
 
 def load_items(cat):
     rows = cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number").fetchall()
     dup_sha = {r["sha1"] for r in cat.duplicate_images()}
+    thumbs = pictures.thumbs_by_key(cat)
+    game_why = games.classify(cat)
+    tunes = {k: len(v) for k, v in pictures.music_by_key(cat).items()}
     top = cat.top_ids()
     inside = {}      # top-level id -> every archive / image found inside it
     for r in cat.db.execute("SELECT * FROM media WHERE parent_id IS NOT NULL ORDER BY id"):
@@ -210,12 +249,19 @@ def load_items(cat):
             files = "—"
         shas = {r["sha1"] for r in [m] + kids if r["kind"] in IMAGE_KINDS}
         dups = frozenset(shas & dup_sha)
+        th = thumbs.get(pictures.item_key(m))
         items.append(Item(
             id=m["id"], number=m["number"] or 0, file=os.path.basename(m["source"].rstrip("/")),
             path=m["source"], type=typ, icon=ico, title=title, from_text=from_text, files=files,
             status=status, sha1=disk["sha1"] or m["sha1"] or "", dup=bool(dups), dup_shas=dups,
             non_dos=non_dos and status != "empty",
-            hard_drive=dkind in ("hdf", "folder") or any(k["kind"] == "hdf" for k in kids)))
+            hard_drive=dkind in ("hdf", "folder") or any(k["kind"] == "hdf" for k in kids),
+            thumb_icon=pictures.picture_path(th["icon"]) or "" if th else "",
+            pic=pictures.picture_path(th["pic"]) or "" if th else "",
+            pic_from=(th["pic_from"] or "") if th else "",
+            pic_origin=(th["origin"] or "") if th else "",
+            game=game_why.get(m["id"], ""),
+            key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0)))
     return items
 
 
@@ -272,6 +318,7 @@ class ItemModel(QAbstractTableModel):
 class RowDelegate(QStyledItemDelegate):
     """Paints rows the way the design draws them."""
     PAD = 12
+    SLOT_W, SLOT_H = 56, 42      # the picture / icon at the start of each row
 
     def paint(self, p, opt, index):
         it = index.data(Qt.ItemDataRole.UserRole)
@@ -292,8 +339,8 @@ class RowDelegate(QStyledItemDelegate):
             p.setPen(C["ink-muted"])
             p.drawText(QRectF(x, r.top(), w, r.height()), Qt.AlignmentFlag.AlignVCenter, f"#{it.number:04d}")
         elif col == 1:
-            p.drawPixmap(x, r.top() + (r.height() - 32) // 2, icon(it.icon, 32))
-            tx, tw = x + 42, w - 42
+            self._paint_thumb(p, it, x, r)
+            tx, tw = x + self.SLOT_W + 10, w - self.SLOT_W - 10
             f1, f2 = ui_font(14, QFont.Weight.Medium), data_font(12)
             h = QFontMetrics(f1).height() + QFontMetrics(f2).height()
             y = r.top() + (r.height() - h) / 2
@@ -360,8 +407,49 @@ class RowDelegate(QStyledItemDelegate):
         p.drawText(QRectF(tx, y, w, h), Qt.AlignmentFlag.AlignVCenter, text)
         return x + w
 
+    def _paint_thumb(self, p, it, x, r):
+        """Games show their picture (title screen); other items their own Workbench icon.
+        Failing those, the picture if there is one, else the generic symbol for the type."""
+        sw, sh = self.SLOT_W, self.SLOT_H
+        cy = r.top() + (r.height() - sh) // 2
+        order = ("pic", "icon") if it.game else ("icon", "pic")
+        for what in order:
+            if what == "pic" and it.pic:
+                pm = thumb(it.pic, sw, sh)
+                if pm is not None:
+                    px, py = x + (sw - pm.width()) // 2, cy + (sh - pm.height()) // 2
+                    p.drawPixmap(px, py, pm)
+                    p.setPen(QPen(C["line"], 1))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawRect(px, py, pm.width() - 1, pm.height() - 1)
+                    return
+            if what == "icon" and it.thumb_icon:
+                pm = thumb(it.thumb_icon, sw - 8, sh - 4)
+                if pm is not None:
+                    p.drawPixmap(x + (sw - pm.width()) // 2, cy + (sh - pm.height()) // 2, pm)
+                    return
+        p.drawPixmap(x + (sw - 32) // 2, cy + (sh - 32) // 2, icon(it.icon, 32))
+
     def sizeHint(self, opt, index):
-        return QSize(100, 52)
+        """The width each column needs for this row (used when a divider is double-clicked)."""
+        it = index.data(Qt.ItemDataRole.UserRole)
+        col = index.column()
+        w = 100
+        if it is not None:
+            if col == 0:
+                w = QFontMetrics(data_font(13)).horizontalAdvance(f"#{it.number:04d}")
+            elif col == 1:
+                w = self.SLOT_W + 10 + max(QFontMetrics(ui_font(14, QFont.Weight.Medium)).horizontalAdvance(it.file),
+                             QFontMetrics(data_font(12)).horizontalAdvance(it.type))
+            elif col == 2:
+                w = QFontMetrics(ui_font(14, italic=it.from_text)).horizontalAdvance(it.title)
+                if it.from_text:
+                    w += QFontMetrics(ui_font(12)).horizontalAdvance(" · from disk text")
+            elif col == 3:
+                w = QFontMetrics(data_font(13)).horizontalAdvance(it.files)
+            else:
+                w = 120 + (110 if it.dup else 0)
+        return QSize(w + 2 * self.PAD + 4, 56)
 
 
 # ---------------------------------------------------------------- window
@@ -440,9 +528,10 @@ class WrapLabel(QLabel):
 
     def _fit(self):
         if self.width() > 0:
+            old = self.minimumHeight()
+            self.setMinimumHeight(0)       # Qt's measurement includes the current minimum
             h = self.heightForWidth(self.width())
-            if h > 0 and h != self.minimumHeight():
-                self.setMinimumHeight(h)
+            self.setMinimumHeight(h if h > 0 else old)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -504,11 +593,47 @@ class Note(QFrame):
         lay.addLayout(body, 1)
 
 
+class PictureView(QLabel):
+    """A picture that fills the panel's width, keeping its shape (pixel art stays crisp)."""
+
+    MAX_H = 360
+
+    def __init__(self):
+        super().__init__()
+        self.path = None
+        self.setObjectName("picture")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumWidth(40)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    def set_picture(self, path):
+        self.path = path
+        self._fit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self):
+        if not self.path or self.width() <= 0:
+            return
+        src = QPixmap(self.path)
+        if src.isNull():
+            return
+        w = self.width()
+        h = min(self.MAX_H, int(src.height() * w / src.width()))
+        pm = thumb(self.path, w, h)
+        if pm is not None:
+            if self.height() != pm.height():
+                self.setFixedHeight(pm.height())
+            self.setPixmap(pm)
+
+
 class DetailsPanel(QFrame):
     """Everything about the selected item: the right-hand panel of the design."""
     FACTS = ["Filesystem", "Bootblock", "Contents", "Status", "Size", "Scanned"]
 
-    def __init__(self, cat, on_select_number, on_copy=None):
+    def __init__(self, cat, on_select_number, on_copy=None, on_online=None, on_play=None):
         super().__init__()
         self.cat = cat
         self.on_select_number = on_select_number
@@ -549,6 +674,15 @@ class DetailsPanel(QFrame):
         head.addLayout(col, 1)
         v.addLayout(head)
 
+        self.picture = PictureView()
+        v.addWidget(self.picture)
+        self.pic_caption = _wrap_label("", ui_font(12), "muted")
+        self.pic_caption.setTextFormat(Qt.TextFormat.RichText)
+        self.pic_caption.linkActivated.connect(
+            lambda link: on_online() if link == "#online" and on_online else
+            QDesktopServices.openUrl(QUrl(link)))
+        v.addWidget(self.pic_caption)
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(12)
@@ -576,10 +710,31 @@ class DetailsPanel(QFrame):
         self.notes.setSpacing(10)
         v.addLayout(self.notes)
 
-        self.contents_label = QLabel("CONTENTS")
-        self.contents_label.setObjectName("section")
         lf = ui_font(12, QFont.Weight.DemiBold)
         lf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
+        self.music_label = QLabel("MUSIC")
+        self.music_label.setObjectName("section")
+        self.music_label.setFont(lf)
+        v.addWidget(self.music_label)
+        self.tunes = QTreeWidget()
+        self.tunes.setObjectName("tunes")
+        self.tunes.setColumnCount(2)
+        self.tunes.setHeaderHidden(True)
+        self.tunes.setRootIsDecorated(False)
+        self.tunes.setUniformRowHeights(True)
+        self.tunes.setFont(ui_font(13))
+        self.tunes.setIconSize(QSize(16, 16))
+        self.tunes.setToolTip("Double-click a tune (or select it and press Enter) to play it")
+        mh = self.tunes.header()
+        mh.setStretchLastSection(False)
+        mh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        mh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tunes.itemActivated.connect(lambda it, _c: on_play and on_play(self.tune_rows, it.data(0, Qt.ItemDataRole.UserRole)))
+        v.addWidget(self.tunes)
+        self.tune_rows = []
+
+        self.contents_label = QLabel("CONTENTS")
+        self.contents_label.setObjectName("section")
         self.contents_label.setFont(lf)
         v.addWidget(self.contents_label)
         self.tree = QTreeWidget()
@@ -667,7 +822,10 @@ class DetailsPanel(QFrame):
             d = direct[0]
         info = _j(d["info"], {})
 
-        self.big_icon.setPixmap(icon(item.icon, 64))
+        own = thumb(item.thumb_icon, 64, 64, upscale=False) if item.thumb_icon else None
+        self.big_icon.setPixmap(own if own is not None else icon(item.icon, 64))
+        self.big_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._show_picture(item)
         what = KIND_NAME.get(kind, kind.upper())
         if d is not m:
             what = f"{KIND_NAME.get(d['kind'], d['kind'].upper())} in a {KIND_NAME.get(kind, kind)}"
@@ -767,6 +925,8 @@ class DetailsPanel(QFrame):
                 "accent", "duplicate",
                 f"<b>Duplicate:</b> same disk as {', '.join(links)}{more}. You only need to keep one.",
                 on_link=lambda n: self.on_select_number(int(n))))
+        if item.game and not m["whd_name"]:
+            self.notes.addWidget(Note("neutral", "game", f"<b>Game</b> — {_esc(item.game)}"))
         if m["whd_name"]:
             lines = [x for x in (m["whd_copy"], m["whd_info"]) if x]
             self.notes.addWidget(Note("accent", "game", f"<b>WHDLoad game:</b> {_esc(m['whd_name'])}",
@@ -817,12 +977,39 @@ class DetailsPanel(QFrame):
                 it = QTreeWidgetItem(["Nothing to list."])
                 it.setForeground(0, C["ink-muted"])
                 self.tree.addTopLevelItem(it)
+        self._fill_tunes(item)
         has_list = self.tree.topLevelItemCount() > 0
         self.contents_label.setVisible(has_list)
         self.tree.setVisible(has_list)
         self._fit_tree()
         self.stack.setCurrentWidget(self.page)
         self.page.verticalScrollBar().setValue(0)
+
+    def _fill_tunes(self, item):
+        self.tunes.clear()
+        self.tune_rows = self.cat.db.execute(
+            "SELECT * FROM music WHERE key=? ORDER BY rowid", (item.key,)).fetchall() if item.music else []
+        for i, r in enumerate(self.tune_rows):
+            name = r["file"].rsplit("/", 1)[-1]
+            title = r["title"] or re.sub(r"^(mod|med|xm|s3m)\.", "", name, flags=re.I)
+            ok = r["fmt"] in music.PLAYABLE
+            where = f"{r['fmt']}" + (f" · in {name}" if r["length"] else "")
+            it = QTreeWidgetItem([title, where])
+            it.setData(0, Qt.ItemDataRole.UserRole, i)
+            it.setIcon(0, QIcon(icon("music", 16)))
+            it.setForeground(1, C["ink-muted"])
+            it.setToolTip(0, r["shown"] + ("" if ok else f"\n{r['fmt']} tunes can't be played yet"))
+            if not ok:
+                it.setDisabled(True)
+            self.tunes.addTopLevelItem(it)
+        n = len(self.tune_rows)
+        self.music_label.setText(f"MUSIC · {n} MODULE{'S' if n != 1 else ''} · DOUBLE-CLICK TO PLAY")
+        self.music_label.setVisible(bool(n))
+        self.tunes.setVisible(bool(n))
+        if n:
+            row_h = max(self.tunes.sizeHintForRow(0), 22)
+            self.tunes.setFixedHeight(min(n, 10) * row_h + 10)
+            self.tunes.setCurrentItem(self.tunes.topLevelItem(0))
 
     def _fit_tree(self, max_rows=16):
         """Size the contents list to its rows (up to max_rows; it scrolls beyond that)."""
@@ -880,6 +1067,31 @@ class DetailsPanel(QFrame):
             add_files(node, k["id"])
         return total
 
+    def _show_picture(self, item):
+        if item.pic and os.path.exists(item.pic):
+            self.picture.set_picture(item.pic)
+            if item.pic_origin == "online":
+                path, _, name = item.pic_from.partition("|")
+                kind = {"Named_Titles": "Title screen", "Named_Snaps": "Screenshot",
+                        "Named_Boxarts": "Box art"}.get(path.split("/")[0], "Picture")
+                self.pic_caption.setText(
+                    f"{kind} from the <a href='https://github.com/{pictures.LR_REPO}'>"
+                    f"libretro-thumbnails</a> collection, matched by the name "
+                    f"“{_esc(name)}”. © its publisher; kept on this computer for your own use.")
+            else:
+                self.pic_caption.setText("Picture found on the disk: "
+                                         + _esc(_breakable(item.pic_from)))
+            self.picture.show()
+            self.pic_caption.show()
+        elif item.game:
+            self.picture.hide()
+            self.pic_caption.setText("No picture of this game on the disk. "
+                                     "<a href='#online'>Find pictures online…</a>")
+            self.pic_caption.show()
+        else:
+            self.picture.hide()
+            self.pic_caption.hide()
+
     def show_in_folder(self):
         if not self.source:
             return
@@ -935,6 +1147,255 @@ class ScanWorker(QThread):
             if cat is not None:
                 cat.db.close()
 
+
+
+# ---------------------------------------------------------------- music
+
+class ModuleStream(QIODevice):
+    """Sound for Qt, rendered by libopenmpt as Qt asks for it."""
+
+    def __init__(self, module, rate):
+        super().__init__()
+        self.module, self.rate, self.done = module, rate, False
+        self.open(QIODevice.OpenModeFlag.ReadOnly)
+
+    def readData(self, maxlen):
+        if self.done or self.module.mod is None:
+            return b""
+        pcm = self.module.render(max(1, min(maxlen // 4, 8192)), self.rate)
+        if not pcm:
+            self.done = True
+        return pcm
+
+    def writeData(self, data):
+        return -1
+
+    def bytesAvailable(self):
+        return 0 if self.done else 1 << 16
+
+    def isSequential(self):
+        return True
+
+
+class ModulePlayer(QObject):
+    """Plays one module at a time through Qt Multimedia (PipeWire, PulseAudio, Windows, macOS)."""
+    ended = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.sink = self.stream = self.module = None
+        self.state = "stopped"          # stopped / playing / paused
+
+    def play(self, data):
+        from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
+        self.stop()
+        device = QMediaDevices.defaultAudioOutput()
+        fmt = QAudioFormat()
+        fmt.setChannelCount(2)
+        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        fmt.setSampleRate(music.RATE)
+        if not device.isFormatSupported(fmt):
+            fmt.setSampleRate(device.preferredFormat().sampleRate() or 44100)
+        module = music.Module(data)
+        self.module = module
+        self.stream = ModuleStream(module, fmt.sampleRate())
+        self.sink = QAudioSink(device, fmt, self)
+        self.sink.setBufferSize(fmt.sampleRate() * 4 // 5)          # about 0.2 s
+        self._idle = QAudio.State.IdleState
+        self.sink.stateChanged.connect(self._state_changed)
+        self.sink.start(self.stream)
+        self.state = "playing"
+        return module
+
+    def _state_changed(self, st):
+        # Idle after the stream has run dry means the tune has finished.
+        if st == self._idle and self.stream is not None and self.stream.done:
+            self.state = "stopped"
+            QTimer.singleShot(0, self.ended.emit)
+
+    def pause(self):
+        if self.sink and self.state == "playing":
+            self.sink.suspend()
+            self.state = "paused"
+
+    def resume(self):
+        if self.sink and self.state == "paused":
+            self.sink.resume()
+            self.state = "playing"
+
+    def stop(self):
+        if self.sink:
+            self.sink.stateChanged.disconnect(self._state_changed)
+            self.sink.stop()
+            self.sink.deleteLater()
+        if self.stream:
+            self.stream.close()
+        if self.module:
+            self.module.close()
+        self.sink = self.stream = self.module = None
+        self.state = "stopped"
+
+    def position(self):
+        return self.sink.processedUSecs() / 1e6 if self.sink else 0.0
+
+
+class PlayerBar(QFrame):
+    """'Now playing' strip above the status line; music carries on while you browse."""
+
+    def __init__(self, cat):
+        super().__init__()
+        self.cat = cat
+        self.setObjectName("playerBar")
+        self.player = ModulePlayer()
+        self.player.ended.connect(self._ended)
+        self.playlist, self.index, self.label = [], 0, ""
+        h = QHBoxLayout(self)
+        h.setContentsMargins(24, 8, 24, 8)
+        h.setSpacing(12)
+        note = QLabel()
+        note.setPixmap(icon("music", 24))
+        self.what = QLabel()
+        self.what.setFont(ui_font(13, QFont.Weight.DemiBold))
+        self.what.setMinimumWidth(40)
+        self.what.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.time = QLabel()
+        self.time.setObjectName("muted")
+        self.time.setFont(data_font(12))
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setRange(0, 1000)
+        self.bar.setFixedWidth(160)
+        self.pause_btn = QPushButton("Pause")
+        self.next_btn = QPushButton("Next")
+        self.stop_btn = QPushButton("Stop")
+        for b in (self.pause_btn, self.next_btn, self.stop_btn):
+            b.setObjectName("small")
+            b.setFont(ui_font(13, QFont.Weight.DemiBold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pause_btn.clicked.connect(self.toggle)
+        self.next_btn.clicked.connect(self.next)
+        self.stop_btn.clicked.connect(self.stop)
+        h.addWidget(note)
+        h.addWidget(self.what, 1)
+        h.addWidget(self.bar)
+        h.addWidget(self.time)
+        h.addWidget(self.pause_btn)
+        h.addWidget(self.next_btn)
+        h.addWidget(self.stop_btn)
+        self.timer = QTimer(self, interval=250)
+        self.timer.timeout.connect(self._tick)
+        self.duration = 0.0
+        self.hide()
+
+    def play(self, rows, index, label=""):
+        ok, why = music.available()
+        self.show()
+        if not ok:
+            self.what.setText(f"Can't play music: {why}")
+            self.time.setText("")
+            return
+        self.playlist, self.index, self.label = list(rows), index, label
+        self._start()
+
+    def _start(self):
+        r = self.playlist[self.index]
+        name = r["file"].rsplit("/", 1)[-1]
+        title = r["title"] or name
+        try:
+            data = pictures.module_data(self.cat, r)
+            mod = self.player.play(data)
+        except Exception as ex:
+            self.what.setText(f"Can't play {title}: {ex}")
+            self.time.setText("")
+            return
+        self.duration = mod.duration
+        kind = mod.meta("type_long") or r["fmt"]
+        artist = mod.meta("artist")
+        bits = [f"{title}"] + ([f"by {artist}"] if artist else []) + [kind]
+        if len(self.playlist) > 1:
+            bits.append(f"{self.index + 1} of {len(self.playlist)}")
+        if self.label:
+            bits.append(self.label)
+        self.what.setText(" · ".join(bits))
+        self.what.setToolTip(r["shown"])
+        self.pause_btn.setText("Pause")
+        self.next_btn.setEnabled(len(self.playlist) > 1)
+        self.timer.start()
+        self._tick()
+
+    def _tick(self):
+        pos = min(self.player.position(), self.duration or 0)
+        self.time.setText(f"{music.fmt_time(pos)} / {music.fmt_time(self.duration)}")
+        self.bar.setValue(int(1000 * pos / self.duration) if self.duration else 0)
+
+    def toggle(self):
+        if self.player.state == "playing":
+            self.player.pause()
+            self.pause_btn.setText("Play")
+        elif self.player.state == "paused":
+            self.player.resume()
+            self.pause_btn.setText("Pause")
+        elif self.playlist:
+            self._start()
+
+    def _next_playable(self, wrap):
+        n = len(self.playlist)
+        for step in range(1, n + 1):
+            i = self.index + step
+            if i >= n and not wrap:
+                return None
+            if self.playlist[i % n]["fmt"] in music.PLAYABLE:
+                return i % n
+        return None
+
+    def next(self):
+        i = self._next_playable(wrap=True)
+        if i is not None:
+            self.index = i
+            self._start()
+
+    def _ended(self):
+        i = self._next_playable(wrap=False)       # carry on through the disk's tunes
+        if i is not None:
+            self.index = i
+            self._start()
+            return
+        self.timer.stop()
+        self.pause_btn.setText("Play")
+        self.index = 0
+        self._tick()
+
+    def stop(self):
+        self.player.stop()
+        self.timer.stop()
+        self.hide()
+
+
+# ---------------------------------------------------------------- pictures
+
+class PictureWorker(QThread):
+    """Look for icons and pictures on items not yet looked at; optionally online too."""
+    progress = Signal(str, int, int)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path, online=False):
+        super().__init__()
+        self.db_path, self.online = db_path, online
+        self.stop_wanted = False
+
+    def run(self):
+        try:
+            cat = Catalogue(self.db_path)
+            stop = lambda: self.stop_wanted
+            res = {"disk": pictures.build(
+                cat, lambda i, n, m: self.progress.emit("disk", i, n), stop)}
+            if self.online and not self.stop_wanted:
+                res["online"] = pictures.lookup_online(
+                    cat, lambda i, n, m: self.progress.emit("online", i, n), stop)
+            self.done.emit(res)
+        except Exception as ex:
+            self.failed.emit(str(ex))
 
 
 # ---------------------------------------------------------------- Gotek
@@ -1261,13 +1722,17 @@ class MainWindow(QMainWindow):
         self.gotek_btn = QPushButton("Copy to Gotek stick")
         self.gotek_btn.setToolTip("Copy the selected disks to a USB stick for a Gotek drive (Ctrl+G). "
                                   "Select several with Ctrl or Shift.")
-        for b in (self.scan_btn, self.rescan_btn, self.gotek_btn):
+        self.online_btn = QPushButton("Find pictures online")
+        self.online_btn.setToolTip("Look up title screens for disks that have no picture of their own, "
+                                   "in the libretro-thumbnails collection on GitHub")
+        for b in (self.scan_btn, self.rescan_btn, self.gotek_btn, self.online_btn):
             b.setFont(ui_font(14, QFont.Weight.DemiBold))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             hl.addWidget(b)
         self.scan_btn.clicked.connect(self.scan_folder)
         self.rescan_btn.clicked.connect(self.rescan)
         self.gotek_btn.clicked.connect(lambda: self.copy_to_gotek())
+        self.online_btn.clicked.connect(self.find_online)
         v.addWidget(head)
 
         # Search
@@ -1346,7 +1811,7 @@ class MainWindow(QMainWindow):
         self.table.setMouseTracking(False)
         self.table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(52)
+        self.table.verticalHeader().setDefaultSectionSize(56)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         hh = self.table.horizontalHeader()
@@ -1356,14 +1821,17 @@ class MainWindow(QMainWindow):
         hh.setHighlightSections(False)
         hh.setSectionsClickable(False)
         hh.setMinimumSectionSize(60)
-        for col, mode, width in ((0, QHeaderView.ResizeMode.Fixed, 84),
-                                 (1, QHeaderView.ResizeMode.Stretch, 0),
-                                 (2, QHeaderView.ResizeMode.Stretch, 0),
-                                 (3, QHeaderView.ResizeMode.Fixed, 80),
-                                 (4, QHeaderView.ResizeMode.Fixed, 210)):
-            hh.setSectionResizeMode(col, mode)
-            if width:
-                self.table.setColumnWidth(col, width)
+        # Every divider can be dragged (double-click one to fit the column to its contents);
+        # the Status column takes up whatever room is left. Widths are remembered.
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hh.setStretchLastSection(True)
+        hh.setCascadingSectionResizes(False)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.widths_set = False
+        self.save_widths = QTimer(self, singleShot=True, interval=600)
+        self.save_widths.timeout.connect(
+            lambda: self.cat.set_meta("column_widths", [hh.sectionSize(c) for c in range(4)]))
+        hh.sectionResized.connect(lambda *_: self.widths_set and self.save_widths.start())
 
         self.message = QLabel()
         self.message.setObjectName("message")
@@ -1380,7 +1848,8 @@ class MainWindow(QMainWindow):
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(1, 1, 1, 1)
         pl.addWidget(self.stack)
-        self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek)
+        self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek, self.find_online,
+                                    self.play_music)
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("split")
         split.setHandleWidth(20)
@@ -1395,6 +1864,9 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(24, 4, 24, 24)
         ll.addWidget(split)
         v.addWidget(lw, 1)
+
+        self.player_bar = PlayerBar(self.cat)
+        v.addWidget(self.player_bar)
 
         # Status line
         foot = QFrame()
@@ -1432,9 +1904,13 @@ class MainWindow(QMainWindow):
         self.table.selectionModel().currentRowChanged.connect(self._row_changed)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._selection_changed())
 
+        self.pic_worker = None
+        self.pic_refresh = QTimer(self, interval=8000)   # show pictures as they are found
+        self.pic_refresh.timeout.connect(self.reload)
         self._fill_counts()
         self.run_search()
         self.search.edit.setFocus()
+        QTimer.singleShot(1500, self.find_pictures)
 
     def _row_changed(self, current, _previous):
         if not current.isValid():
@@ -1453,6 +1929,10 @@ class MainWindow(QMainWindow):
     def _selection_changed(self):
         n = len(self.table.selectionModel().selectedRows())
         self.gotek_btn.setText(f"Copy {n:,} to Gotek stick" if n > 1 else "Copy to Gotek stick")
+
+    def play_music(self, rows, index):
+        it = next((x for x in self.model.items if x.id == self.current_id), None)
+        self.player_bar.play(rows, index, f"#{it.number:04d}" if it else "")
 
     def copy_to_gotek(self, ids=None):
         ids = ids or self.selected_ids()
@@ -1527,6 +2007,7 @@ class MainWindow(QMainWindow):
         self.scan_btn.setEnabled(False)
         self.rescan_btn.setEnabled(False)
         self.found_count = 0
+        self.stop_pictures()
         self.worker = ScanWorker(self.db_path, folders)
         self.worker.line.connect(self._scan_line)
         self.worker.step.connect(self._scan_step)
@@ -1617,14 +2098,113 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.scan_btn.setEnabled(True)
         self.rescan_btn.setEnabled(True)
+        self.find_pictures()
+
+    # -------------------------------------------------------------- pictures
+    def find_pictures(self, online=None):
+        """Look for pictures on new items (and online, once the user has agreed to that)."""
+        if self.pic_worker is not None or self.worker is not None:
+            return
+        if online is None:
+            online = bool(self.cat.get_meta("online_pictures", False))
+        self.pic_worker = PictureWorker(self.db_path, online)
+        self.pic_worker.progress.connect(self._pic_progress)
+        self.pic_worker.done.connect(self._pic_done)
+        self.pic_worker.failed.connect(lambda e: self._pic_note(f"Finding pictures failed: {e}"))
+        self.pic_worker.finished.connect(self._pic_finished)
+        self.online_btn.setEnabled(False)
+        self.pic_worker.start()
+        self.pic_refresh.start()
+
+    def find_online(self):
+        if not self.cat.get_meta("online_pictures", False):
+            box = QMessageBox(self)
+            box.setWindowTitle("Find pictures online")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText("Look up pictures online for disks that have none of their own?")
+            box.setInformativeText(
+                "TurboCAT matches each disk's title against the libretro-thumbnails collection "
+                "(the pictures RetroArch uses), on GitHub, and downloads a title screen when the "
+                "name matches exactly.\n\nThese pictures belong to the games' publishers. They "
+                "are kept on this computer for your own use. After this, new disks are looked up "
+                "automatically after each scan.")
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            box.button(QMessageBox.StandardButton.Yes).setText("Look online")
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                return
+            self.cat.set_meta("online_pictures", True)
+        if self.pic_worker is not None:      # finish the disk search first, then go online
+            self.pic_worker.online = True
+            return
+        self.find_pictures(online=True)
+
+    def stop_pictures(self):
+        if self.pic_worker is not None:
+            self.pic_worker.stop_wanted = True
+            self.pic_worker.wait(30000)
+
+    def _pic_note(self, text):
+        self.foot_left.setText(text)
+
+    def _pic_progress(self, phase, i, n):
+        if not n or i >= n:
+            return
+        if phase == "disk":
+            self._pic_note(f"Looking for pictures on disks… {i:,} of {n:,}")
+        else:
+            self._pic_note(f"Looking for pictures online… {i:,} of {n:,}")
+
+    def _pic_done(self, res):
+        bits = []
+        if res["disk"]["looked"]:
+            bits.append(f"{res['disk']['found']:,} of {res['disk']['looked']:,} new items had pictures "
+                        "or icons on the disk")
+        if "online" in res and res["online"]["looked"]:
+            bits.append(f"{res['online']['found']:,} pictures found online")
+        self.reload()
+        if bits:
+            self._pic_note(" · ".join(bits))
+            QTimer.singleShot(15000, self._fill_counts)
+
+    def _pic_finished(self):
+        self.pic_worker = None
+        self.pic_refresh.stop()
+        self.online_btn.setEnabled(True)
 
     def reload(self):
         """Re-read the catalogue after a scan, keeping the search and selection."""
+        before = {it.id: (it.pic, it.thumb_icon) for it in self.all_items}
         self.all_items = load_items(self.cat)
-        self._fill_counts()
+        if self.pic_worker is None:
+            self._fill_counts()
         self.run_search()
+        cur = next((it for it in self.model.items if it.id == self.current_id), None)
+        if cur is not None and before.get(cur.id) != (cur.pic, cur.thumb_icon):
+            self.details.show_item(cur)        # a picture was just found for it
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self.widths_set:
+            QTimer.singleShot(0, self._set_widths)
+
+    def _set_widths(self):
+        """Remembered column widths, or a fair share of the list's width the first time."""
+        saved = self.cat.get_meta("column_widths")
+        if isinstance(saved, list) and len(saved) == 4 and all(isinstance(x, int) for x in saved):
+            widths = saved
+        else:
+            room = max(400, self.table.viewport().width() - 84 - 80 - 210)
+            widths = [84, room // 2, room - room // 2, 80]
+        for col, width in enumerate(widths):
+            self.table.setColumnWidth(col, max(60, width))
+        # Status gets the rest of the room, but never less than its pills need.
+        rest = self.table.viewport().width() - sum(max(60, x) for x in widths)
+        self.table.setColumnWidth(4, max(210, rest))
+        self.widths_set = True
 
     def closeEvent(self, event):
+        self.player_bar.player.stop()
+        self.stop_pictures()
         if self.worker is not None:
             self.worker.stop_wanted = True
             self.worker.wait(30000)
@@ -1666,6 +2246,8 @@ class MainWindow(QMainWindow):
         test = FILTER_TEST[self.filter]
         shown = [it for it in shown if test(it)]
         label = dict((k, l) for k, l, _, _ in FILTERS)[self.filter]
+        if self.filter == "music":
+            label = "Items with music"
         if text and self.filter != "all":
             self.result_label.setText(f"{len(shown):,} {label.lower()} among the {matched:,} "
                                       f"items that match “{text}”")
@@ -1721,7 +2303,9 @@ class MainWindow(QMainWindow):
             #panel {{ border: 1px solid {c['line']}; border-radius: 8px; background: {c['surface']}; }}
             QTableView {{ border: none; background: {c['surface']}; outline: 0; }}
             QHeaderView::section {{ background: {c['chrome']}; color: {c['ink-muted']}; border: none;
-                                    border-bottom: 1px solid {c['line']}; padding: 10px 12px; }}
+                                    border-bottom: 1px solid {c['line']}; padding: 10px 12px;
+                                    border-right: 1px solid {c['row-line']}; }}
+            QHeaderView::section:last {{ border-right: none; }}
             #details {{ border: 1px solid {c['line']}; border-radius: 8px; background: {c['surface']}; }}
             #detailsPage {{ background: {c['surface']}; border-radius: 8px; }}
             QLabel#section {{ color: {c['ink-muted']}; }}
@@ -1764,12 +2348,19 @@ class MainWindow(QMainWindow):
                                            selection-background-color: {c['accent-tint']};
                                            selection-color: {c['accent-ink']}; }}
             QPushButton#small {{ min-height: 30px; padding: 0 12px; }}
+            #playerBar {{ background: {c['accent-tint']}; border-top: 1px solid {c['line']}; }}
+            #playerBar QLabel {{ color: {c['accent-ink']}; }}
+            QTreeWidget#tunes::item {{ padding: 3px 4px; }}
+            QTreeWidget#tunes::item:selected {{ background: {c['accent-tint']}; color: {c['accent-ink']}; }}
             #scanBar {{ background: {c['accent-tint']}; border-radius: 8px; }}
             #scanBar QLabel {{ color: {c['accent-ink']}; }}
             #scanBar QLabel#scanFile {{ color: {c['ink-muted']}; }}
             QProgressBar {{ border: none; background: {c['surface']}; border-radius: 3px; max-height: 6px; }}
             QProgressBar::chunk {{ background: {c['accent']}; border-radius: 3px; }}
             QScrollBar:vertical {{ background: {c['surface']}; width: 12px; margin: 0; }}
+            QScrollBar:horizontal {{ background: {c['surface']}; height: 12px; margin: 0; }}
+            QScrollBar::handle:horizontal {{ background: {c['line']}; border-radius: 4px; min-width: 30px;
+                                             margin: 2px; }}
             QScrollBar::handle:vertical {{ background: {c['line']}; border-radius: 4px; min-height: 30px;
                                            margin: 2px; }}
             QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
