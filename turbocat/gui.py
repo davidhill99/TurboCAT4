@@ -18,7 +18,7 @@ from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiAp
                            QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QProgressBar,
+                               QButtonGroup, QHBoxLayout, QProgressBar,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QPushButton,
                                QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
                                QTableView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -66,6 +66,19 @@ STATUS = {"ok": ("OK", "ok", "ok-tint", None),
           "warning": ("Warning", "warn", "warn-tint", "warning"),
           "error": ("Problem", "problem", "problem-tint", "problem"),
           "empty": ("Empty", "ink-soft", "neutral-tint", None)}
+
+# Filter chips above the list: key, label, icon, test for an item.
+FILTERS = [
+    ("all", "All items", None, lambda it: True),
+    ("problems", "Problems", "problem", lambda it: it.status == "error"),
+    ("warnings", "Warnings", "warning", lambda it: it.status == "warning"),
+    ("dups", "Duplicates", "duplicate", lambda it: it.dup),
+    ("whd", "WHDLoad games", "game", lambda it: it.type == "WHDLoad"),
+    ("nondos", "Non-DOS disks", "disk", lambda it: it.non_dos),
+    ("hd", "Hard drives", "harddrive", lambda it: it.hard_drive),
+    ("empty", "Empty", None, lambda it: it.status == "empty"),
+]
+FILTER_TEST = {k: t for k, _, _, t in FILTERS}
 
 
 def _pick_theme():
@@ -131,6 +144,9 @@ class Item:
     sha1: str = ""
     dup: bool = False
     found: str = ""
+    dup_shas: frozenset = frozenset()
+    non_dos: bool = False
+    hard_drive: bool = False
     search_blob: str = field(default="", repr=False)
 
 
@@ -190,10 +206,13 @@ def load_items(cat):
         if status == "empty":
             files = "—"
         shas = {r["sha1"] for r in [m] + kids if r["kind"] in IMAGE_KINDS}
+        dups = frozenset(shas & dup_sha)
         items.append(Item(
             id=m["id"], number=m["number"] or 0, file=os.path.basename(m["source"].rstrip("/")),
             path=m["source"], type=typ, icon=ico, title=title, from_text=from_text, files=files,
-            status=status, sha1=disk["sha1"] or m["sha1"] or "", dup=bool(shas & dup_sha)))
+            status=status, sha1=disk["sha1"] or m["sha1"] or "", dup=bool(dups), dup_shas=dups,
+            non_dos=non_dos and status != "empty",
+            hard_drive=dkind in ("hdf", "folder") or any(k["kind"] == "hdf" for k in kids)))
     return items
 
 
@@ -410,9 +429,35 @@ def _cap(s):
     return s[:1].upper() + s[1:] if s else s
 
 
+class WrapLabel(QLabel):
+    """A word-wrapped label that asks its layout for all the lines it needs.
+
+    Qt box and grid layouts don't pass a wrapped label's height-for-width on, so long
+    titles and facts were cut off after the first line or two."""
+
+    def _fit(self):
+        if self.width() > 0:
+            h = self.heightForWidth(self.width())
+            if h > 0 and h != self.minimumHeight():
+                self.setMinimumHeight(h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def setText(self, text):
+        super().setText(text)
+        self._fit()
+
+    def setFont(self, font):
+        super().setFont(font)
+        self._fit()
+
+
 def _wrap_label(text="", font=None, obj=None):
-    lab = QLabel(text)
+    lab = WrapLabel(text)
     lab.setWordWrap(True)
+    lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     lab.setMinimumWidth(40)
     lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     if font is not None:
@@ -939,6 +984,31 @@ class MainWindow(QMainWindow):
         self.result_label.setObjectName("muted")
         self.result_label.setFont(ui_font(13))
         sl.addWidget(self.search)
+        chips = QHBoxLayout()
+        chips.setSpacing(8)
+        self.filter = "all"
+        self.chips = {}
+        self.chip_group = QButtonGroup(self)
+        self.chip_group.setExclusive(True)
+        for key, label, ico, _ in FILTERS:
+            b = QPushButton(label)
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setFont(ui_font(13, QFont.Weight.DemiBold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            if ico:
+                label = " " + label
+                b.setIcon(QIcon(icon(ico, 16)))
+                b.setIconSize(QSize(16, 16))
+            b.setProperty("hasIcon", bool(ico))
+            b.setText(label)
+            b.clicked.connect(lambda _=False, k=key: self.set_filter(k))
+            self.chip_group.addButton(b)
+            self.chips[key] = (b, label)
+            chips.addWidget(b)
+        chips.addStretch(1)
+        self.chips["all"][0].setChecked(True)
+        sl.addLayout(chips)
         self.scan_bar = QFrame()
         self.scan_bar.setObjectName("scanBar")
         sb = QHBoxLayout(self.scan_bar)
@@ -1087,8 +1157,27 @@ class MainWindow(QMainWindow):
                 if it.number == number:
                     self._select_row(row)
                     return
+            self.filter = "all"
+            self.chips["all"][0].setChecked(True)
             self.search.edit.clear()
             self.run_search()
+
+    def set_filter(self, key):
+        self.filter = key
+        self.chips[key][0].setChecked(True)
+        self.run_search()
+
+    def _fill_chips(self, matched):
+        """Show each chip's count within the current search; hide empty ones."""
+        for key, (b, label) in self.chips.items():
+            hits = [it for it in matched if FILTER_TEST[key](it)]
+            if key == "dups":
+                n = len(set().union(*(it.dup_shas for it in hits)))
+                b.setText(f"{label}  {n:,} set{'s' if n != 1 else ''}")
+            else:
+                n = len(hits)
+                b.setText(f"{label}  {n:,}")
+            b.setVisible(key in ("all", self.filter) or n > 0)
 
     def focus_search(self):
         self.search.edit.setFocus()
@@ -1244,7 +1333,6 @@ class MainWindow(QMainWindow):
             for it in self.all_items:
                 it.found = ""
             shown = self.all_items
-            self.result_label.setText(f"All items {len(shown):,}")
         else:
             hits = self.cat.search_items(text)
             shown = []
@@ -1259,8 +1347,21 @@ class MainWindow(QMainWindow):
                                + (f" and {more:,} more file{'s' if more > 1 else ''}" if more else ""))
                 it.found = " · ".join(why) if why else "image file name"
                 shown.append(it)
+        self._fill_chips(shown)
+        matched = len(shown)
+        test = FILTER_TEST[self.filter]
+        shown = [it for it in shown if test(it)]
+        label = dict((k, l) for k, l, _, _ in FILTERS)[self.filter]
+        if text and self.filter != "all":
+            self.result_label.setText(f"{len(shown):,} {label.lower()} among the {matched:,} "
+                                      f"items that match “{text}”")
+        elif text:
             self.result_label.setText(
                 f"{len(shown):,} of {len(self.all_items):,} items match “{text}”")
+        elif self.filter != "all":
+            self.result_label.setText(f"{label} {len(shown):,} of {len(self.all_items):,} items")
+        else:
+            self.result_label.setText(f"All items {len(shown):,}")
         self.model.set_items(shown)
         if shown:
             ids = [it.id for it in shown]
@@ -1272,8 +1373,12 @@ class MainWindow(QMainWindow):
                 "The catalogue is empty.\n\nClick Scan folder… and choose the folder where you "
                 "keep your Amiga disk images.")
             self.stack.setCurrentWidget(self.message)
-        elif not shown:
+        elif not shown and text and self.filter != "all":
+            self.message.setText(f"No {label.lower()} among the items that match “{text}”.")
+        elif not shown and text:
             self.message.setText(f"Nothing found for “{text}”.")
+        elif not shown:
+            self.message.setText(f"No {label.lower()} in the catalogue.")
             self.stack.setCurrentWidget(self.message)
         else:
             self.stack.setCurrentWidget(self.table)
@@ -1321,6 +1426,11 @@ class MainWindow(QMainWindow):
             QPushButton#primary:hover {{ background: {c['accent-ink']}; }}
             QPushButton#primary:disabled {{ background: {c['line']}; border-color: {c['line']};
                                             color: {c['ink-muted']}; }}
+            QPushButton#chip {{ border-radius: 17px; min-height: 34px; padding: 0 14px; }}
+            QPushButton#chip[hasIcon="true"] {{ padding-left: 10px; }}
+            QPushButton#chip:checked {{ background: {c['accent-tint']}; border: 1px solid {c['accent']};
+                                        color: {c['accent-ink']}; }}
+            QPushButton#chip:focus {{ border: 2px solid {c['accent']}; }}
             QPushButton#small {{ min-height: 30px; padding: 0 12px; }}
             #scanBar {{ background: {c['accent-tint']}; border-radius: 8px; }}
             #scanBar QLabel {{ color: {c['accent-ink']}; }}
