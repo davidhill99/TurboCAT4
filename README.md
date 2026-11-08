@@ -31,6 +31,7 @@ Archives and images inside other images are opened too (up to 3 levels).
 - Scans show a progress bar: how many new or changed files are left, the time remaining, and the file being read. Unchanged files are skipped without being read, so a rescan with nothing new is almost instant
 - Filter chips above the list: All items, Problems, Warnings, Duplicates, WHDLoad games, Non-DOS disks, Hard drives and Empty, with counts that follow the search
 - Long titles and facts in the details panel are no longer cut off
+- **Copy to Gotek stick** (header button, details panel or Ctrl+G): copies the selected disks to a USB stick or any folder as plain ADF files, unpacked from ZIP, LHA, DMS or ADZ. Names them for FlashFloppy, or DSKA0000.ADF style for stock Gotek / HxC firmware. Hard drives, WHDLoad games, blank disks and IPF images are left out with the reason. Select several items with Ctrl or Shift
 - ZIP archives are read (TOSEC packs each disk in a .zip); an archive holding a single disk is listed as that disk
 - Overdumped ADFs (TOSEC "[o]", extra tracks past the end of the disk) are read normally with a note, instead of being reported as a problem and mis-read as high density
 

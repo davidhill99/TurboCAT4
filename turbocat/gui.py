@@ -8,16 +8,18 @@ Run with:  python -m turbocat window   (add --db FILE for another catalogue)
 
 import json
 import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QRectF, QSize, Qt, QThread, QTimer,
+from PySide6.QtCore import (QAbstractTableModel, QItemSelectionModel, QModelIndex, QRectF, QSize, Qt, QThread, QTimer,
                             QUrl, Signal)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QGridLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog,
+                               QFrame, QGridLayout, QListWidget, QListWidgetItem, QRadioButton,
                                QButtonGroup, QHBoxLayout, QProgressBar,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QPushButton,
                                QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFr
 from . import APP_NAME, VERSION
 from .bootblock import best_title
 from .catalogue import Catalogue
+from . import gotek
 from .scanner import rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
@@ -505,11 +508,12 @@ class DetailsPanel(QFrame):
     """Everything about the selected item: the right-hand panel of the design."""
     FACTS = ["Filesystem", "Bootblock", "Contents", "Status", "Size", "Scanned"]
 
-    def __init__(self, cat, on_select_number):
+    def __init__(self, cat, on_select_number, on_copy=None):
         super().__init__()
         self.cat = cat
         self.on_select_number = on_select_number
         self.source = None
+        self.item_id = None
         self.setObjectName("details")
         self.setMinimumWidth(360)
         outer = QVBoxLayout(self)
@@ -600,6 +604,12 @@ class DetailsPanel(QFrame):
         self.show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.show_btn.clicked.connect(self.show_in_folder)
         buttons.addWidget(self.show_btn)
+        self.copy_btn = QPushButton("Copy to Gotek stick")
+        self.copy_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
+        self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.copy_btn.setToolTip("Copy this disk to a USB stick for a Gotek drive")
+        self.copy_btn.clicked.connect(lambda: on_copy and self.item_id and on_copy([self.item_id]))
+        buttons.addWidget(self.copy_btn)
         buttons.addStretch(1)
         v.addLayout(buttons)
         v.addStretch(1)
@@ -615,6 +625,7 @@ class DetailsPanel(QFrame):
     # -------------------------------------------------------------- filling
     def clear(self):
         self.source = None
+        self.item_id = None
         self.stack.setCurrentWidget(self.placeholder)
 
     def _descendants(self, mid):
@@ -645,6 +656,9 @@ class DetailsPanel(QFrame):
         kids = self._descendants(m["id"])
         kind = m["kind"] or ""
         self.source = m["source"]
+        self.item_id = m["id"]
+        floppy = any(r["kind"] in gotek.FLOPPY_KINDS and r["status"] != "empty" for r in [m] + kids)
+        self.copy_btn.setVisible(floppy and not m["whd_name"])
         # An archive holding one disk image is described by that disk.
         d = m
         direct = [k for k in kids if k["parent_id"] == m["id"]]
@@ -922,6 +936,284 @@ class ScanWorker(QThread):
                 cat.db.close()
 
 
+
+# ---------------------------------------------------------------- Gotek
+
+def _mb(n):
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB"
+
+
+class CopyWorker(QThread):
+    progress = Signal(int, int, str)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, db_path, disks, dest, numbered):
+        super().__init__()
+        self.db_path, self.disks, self.dest, self.numbered = db_path, disks, dest, numbered
+        self.stop_wanted = False
+
+    def run(self):
+        try:
+            cat = Catalogue(self.db_path)
+            result = gotek.copy_disks(
+                cat, self.disks, self.dest, self.numbered,
+                progress=lambda i, n, d: self.progress.emit(i, n, d.name if d else ""),
+                stop=lambda: self.stop_wanted)
+            self.done.emit(result)
+        except Exception as ex:
+            self.failed.emit(str(ex))
+
+
+class GotekDialog(QDialog):
+    """Choose a USB stick (or folder) and copy the chosen floppies to it as ADF files."""
+
+    CHOOSE = "__choose__"
+
+    def __init__(self, parent, cat, db_path, top_ids):
+        super().__init__(parent)
+        self.cat, self.db_path = cat, db_path
+        self.setObjectName("dialog")
+        self.setWindowTitle("Copy to Gotek stick")
+        self.setMinimumWidth(620)
+        self.plan = gotek.plan(cat, top_ids)
+        self.worker = None
+        self.dest = None
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 22, 24, 20)
+        v.setSpacing(14)
+
+        n = len(self.plan.disks)
+        head = QLabel(f"Copy {n:,} disk{'s' if n != 1 else ''} to a Gotek stick" if n
+                      else "Nothing to copy")
+        head.setFont(ui_font(20, QFont.Weight.Bold))
+        v.addWidget(head)
+        sub = _wrap_label("", ui_font(13), "muted")
+        if n:
+            sub.setText(f"{_mb(self.plan.total)} as plain ADF files, unpacked from ZIP, LHA, DMS "
+                        "or ADZ where needed. The stick must be FAT32 formatted.")
+        else:
+            sub.setText("None of the chosen items holds a floppy disk image a Gotek can use.")
+        v.addWidget(sub)
+
+        self.list = QListWidget()
+        self.list.setObjectName("diskList")
+        self.list.setFont(ui_font(13))
+        self.list.setIconSize(QSize(16, 16))
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        bad = 0
+        for d in self.plan.disks:
+            it = QListWidgetItem(f"#{d.number:04d}  {d.name}")
+            if d.status == "error":
+                bad += 1
+                it.setIcon(QIcon(icon("problem", 16)))
+                it.setToolTip("Has problems, but will be copied as it is:\n" + "\n".join(d.problems[:5]))
+            elif d.status == "warning":
+                it.setIcon(QIcon(icon("warning", 16)))
+            else:
+                it.setIcon(QIcon(icon("disk", 16)))
+            self.list.addItem(it)
+        for num, name, why in self.plan.skipped:
+            it = QListWidgetItem(f"#{num or 0:04d}  {name}  —  left out: {why}")
+            it.setForeground(C["ink-muted"])
+            it.setToolTip(why)
+            self.list.addItem(it)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        rows = min(self.list.count(), 8)
+        row_h = self.list.sizeHintForRow(0) if self.list.count() else 26
+        self.list.setFixedHeight(max(1, rows) * (row_h + 6) + 12)
+        v.addWidget(self.list)
+        notes = []
+        if self.plan.skipped:
+            k = len(self.plan.skipped)
+            notes.append(f"{k:,} left out (greyed above): hover for the reason.")
+        if bad:
+            notes.append(f"{bad:,} with problems will be copied as they are; they may not load.")
+        if notes:
+            v.addWidget(_wrap_label(" ".join(notes), ui_font(12), "muted"))
+
+        # Where to
+        where = QLabel("Copy to")
+        where.setFont(ui_font(13, QFont.Weight.DemiBold))
+        v.addWidget(where)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.dest_box = QComboBox()
+        self.dest_box.setFont(ui_font(13))
+        self.dest_box.setMinimumHeight(40)
+        self.dest_box.activated.connect(self._dest_chosen)
+        look = QPushButton("Look again")
+        look.setFont(ui_font(13, QFont.Weight.DemiBold))
+        look.setToolTip("Look again for USB sticks (after plugging one in)")
+        look.clicked.connect(self._fill_dests)
+        row.addWidget(self.dest_box, 1)
+        row.addWidget(look)
+        v.addLayout(row)
+
+        names = QLabel("File names")
+        names.setFont(ui_font(13, QFont.Weight.DemiBold))
+        v.addWidget(names)
+        self.by_name = QRadioButton("Disk names, e.g. “Arcade Pool (1994)(Team 17).adf”, for FlashFloppy firmware")
+        self.by_number = QRadioButton("Numbered DSKA0000.ADF, DSKA0001.ADF … for stock Gotek or HxC firmware")
+        for r in (self.by_name, self.by_number):
+            r.setFont(ui_font(13))
+            v.addWidget(r)
+        numbered = bool(cat.get_meta("gotek_numbered", False))
+        (self.by_number if numbered else self.by_name).setChecked(True)
+
+        self.space = _wrap_label("", ui_font(12), "muted")
+        v.addWidget(self.space)
+
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.hide()
+        v.addWidget(self.bar)
+        self.status = _wrap_label("", ui_font(13))
+        self.status.hide()
+        v.addWidget(self.status)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.open_btn = QPushButton("Open folder")
+        self.open_btn.clicked.connect(lambda: self.dest and QDesktopServices.openUrl(QUrl.fromLocalFile(self.dest)))
+        self.open_btn.hide()
+        self.close_btn = QPushButton("Cancel")
+        self.close_btn.clicked.connect(self._close)
+        self.copy_btn = QPushButton("Copy")
+        self.copy_btn.setObjectName("primary")
+        self.copy_btn.setDefault(True)
+        self.copy_btn.clicked.connect(self.start)
+        for b in (self.open_btn, self.close_btn, self.copy_btn):
+            b.setFont(ui_font(14, QFont.Weight.DemiBold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            btns.addWidget(b)
+        v.addLayout(btns)
+        self._fill_dests()
+        if not n:
+            self.copy_btn.setEnabled(False)
+
+    # destination
+    def _fill_dests(self):
+        last = self.cat.get_meta("gotek_dest", "")
+        keep = self.dest
+        self.dest_box.clear()
+        for mnt, label, free in gotek.find_sticks():
+            self.dest_box.addItem(f"{label} — USB stick, {_mb(free)} free", mnt)
+        if last and os.path.isdir(last) and self.dest_box.findData(last) < 0:
+            self.dest_box.addItem(f"{last} (used last time)", last)
+        if keep and os.path.isdir(keep) and self.dest_box.findData(keep) < 0:
+            self.dest_box.addItem(keep, keep)
+        self.dest_box.addItem("Choose a folder…", self.CHOOSE)
+        for want in (keep, last):
+            i = self.dest_box.findData(want) if want else -1
+            if i >= 0:
+                self.dest_box.setCurrentIndex(i)
+                break
+        else:
+            self.dest_box.setCurrentIndex(0)
+        self._dest_chosen(self.dest_box.currentIndex())
+
+    def _dest_chosen(self, index):
+        data = self.dest_box.itemData(index)
+        if data == self.CHOOSE:
+            folder = QFileDialog.getExistingDirectory(self, "Copy the disks to this folder",
+                                                      self.dest or os.path.expanduser("~"))
+            if folder:
+                self.dest = folder
+                self._fill_dests()
+                return
+            if self.dest is None:
+                self.space.setText("No USB stick found. Plug one in and click Look again, "
+                                   "or choose a folder.")
+                self.copy_btn.setEnabled(False)
+                return
+            i = self.dest_box.findData(self.dest)
+            self.dest_box.setCurrentIndex(max(i, 0))
+            data = self.dest
+        self.dest = data
+        self._check_space()
+
+    def _check_space(self):
+        if not self.dest or not self.plan.disks:
+            self.copy_btn.setEnabled(False)
+            return
+        try:
+            free = shutil.disk_usage(self.dest).free
+        except OSError:
+            self.space.setText("That folder can't be read.")
+            self.copy_btn.setEnabled(False)
+            return
+        if free < self.plan.total:
+            self.space.setText(f"Not enough room: the disks need {_mb(self.plan.total)} and "
+                               f"there is {_mb(free)} free.")
+            self.copy_btn.setEnabled(False)
+        else:
+            self.space.setText(f"Needs {_mb(self.plan.total)}; {_mb(free)} free there.")
+            self.copy_btn.setEnabled(True)
+
+    # copying
+    def start(self):
+        numbered = self.by_number.isChecked()
+        self.cat.set_meta("gotek_dest", self.dest)
+        self.cat.set_meta("gotek_numbered", numbered)
+        for w in (self.copy_btn, self.dest_box, self.by_name, self.by_number):
+            w.setEnabled(False)
+        self.close_btn.setText("Stop")
+        self.bar.setRange(0, len(self.plan.disks))
+        self.bar.setValue(0)
+        self.bar.show()
+        self.status.show()
+        self.worker = CopyWorker(self.db_path, self.plan.disks, self.dest, numbered)
+        self.worker.progress.connect(self._progress)
+        self.worker.done.connect(self._done)
+        self.worker.failed.connect(self._failed)
+        self.worker.start()
+
+    def _progress(self, i, n, name):
+        self.bar.setValue(i)
+        if name:
+            self.status.setText(f"Copying {i + 1:,} of {n:,}: {_breakable(name)}")
+
+    def _done(self, result):
+        copied, failed, same = result
+        self.worker = None
+        bits = [f"Copied {len(copied):,} disk{'s' if len(copied) != 1 else ''} to {self.dest}."]
+        if same:
+            bits.append(f"{len(same):,} {'were' if len(same) != 1 else 'was'} already there.")
+        if failed:
+            bits.append(f"{len(failed):,} failed: " + "; ".join(
+                f"{d.name} ({why})" for d, why in failed[:3]) + (" …" if len(failed) > 3 else ""))
+        if copied and gotek.is_removable(self.dest):
+            bits.append("Eject the stick from the file manager before you unplug it.")
+        self.status.setText(_breakable(" ".join(bits)))
+        self.bar.setValue(self.bar.maximum())
+        self.close_btn.setText("Close")
+        self.open_btn.show()
+
+    def _failed(self, err):
+        self.worker = None
+        self.status.setText(f"Copy failed: {err}")
+        self.close_btn.setText("Close")
+
+    def _close(self):
+        if self.worker is not None:
+            self.worker.stop_wanted = True
+            self.close_btn.setEnabled(False)
+            self.worker.wait(30000)
+            self.close_btn.setEnabled(True)
+            return
+        self.accept()
+
+    def reject(self):          # Esc or the window's close button
+        if self.worker is not None:
+            self._close()
+            return
+        super().reject()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, db_path):
         super().__init__()
@@ -966,12 +1258,16 @@ class MainWindow(QMainWindow):
         self.rescan_btn = QPushButton("Rescan")
         self.rescan_btn.setToolTip("Look again at every folder scanned before: new and changed "
                                    "files are read, deleted ones removed (F5)")
-        for b in (self.scan_btn, self.rescan_btn):
+        self.gotek_btn = QPushButton("Copy to Gotek stick")
+        self.gotek_btn.setToolTip("Copy the selected disks to a USB stick for a Gotek drive (Ctrl+G). "
+                                  "Select several with Ctrl or Shift.")
+        for b in (self.scan_btn, self.rescan_btn, self.gotek_btn):
             b.setFont(ui_font(14, QFont.Weight.DemiBold))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             hl.addWidget(b)
         self.scan_btn.clicked.connect(self.scan_folder)
         self.rescan_btn.clicked.connect(self.rescan)
+        self.gotek_btn.clicked.connect(lambda: self.copy_to_gotek())
         v.addWidget(head)
 
         # Search
@@ -1044,7 +1340,7 @@ class MainWindow(QMainWindow):
         self.table.setModel(self.model)
         self.table.setItemDelegate(RowDelegate(self.table))
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setMouseTracking(False)
@@ -1084,7 +1380,7 @@ class MainWindow(QMainWindow):
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(1, 1, 1, 1)
         pl.addWidget(self.stack)
-        self.details = DetailsPanel(self.cat, self.select_number)
+        self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek)
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("split")
         split.setHandleWidth(20)
@@ -1126,6 +1422,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence.StandardKey.Find, self, activated=self.focus_search)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self.search.edit, activated=self.search.edit.clear)
         QShortcut(QKeySequence(Qt.Key.Key_F5), self, activated=self.rescan)
+        QShortcut(QKeySequence("Ctrl+G"), self, activated=lambda: self.copy_to_gotek())
         self.worker = None
         self.hide_bar = QTimer(self, singleShot=True, interval=10000)
         self.hide_bar.timeout.connect(self.scan_bar.hide)
@@ -1133,6 +1430,7 @@ class MainWindow(QMainWindow):
         self.live.timeout.connect(self._live_reload)
         self.current_id = None
         self.table.selectionModel().currentRowChanged.connect(self._row_changed)
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._selection_changed())
 
         self._fill_counts()
         self.run_search()
@@ -1145,6 +1443,22 @@ class MainWindow(QMainWindow):
         it = self.model.items[current.row()]
         self.current_id = it.id
         self.details.show_item(it)
+
+    def selected_ids(self):
+        rows = sorted({i.row() for i in self.table.selectionModel().selectedRows()})
+        if not rows and self.table.currentIndex().isValid():
+            rows = [self.table.currentIndex().row()]
+        return [self.model.items[r].id for r in rows if r < len(self.model.items)]
+
+    def _selection_changed(self):
+        n = len(self.table.selectionModel().selectedRows())
+        self.gotek_btn.setText(f"Copy {n:,} to Gotek stick" if n > 1 else "Copy to Gotek stick")
+
+    def copy_to_gotek(self, ids=None):
+        ids = ids or self.selected_ids()
+        if not ids:
+            return
+        GotekDialog(self, self.cat, self.db_path, ids).exec()
 
     def _select_row(self, row):
         self.table.setCurrentIndex(self.model.index(row, 0))
@@ -1362,10 +1676,17 @@ class MainWindow(QMainWindow):
             self.result_label.setText(f"{label} {len(shown):,} of {len(self.all_items):,} items")
         else:
             self.result_label.setText(f"All items {len(shown):,}")
+        keep = set(self.selected_ids()) if self.model.items else set()
         self.model.set_items(shown)
         if shown:
             ids = [it.id for it in shown]
             self._select_row(ids.index(self.current_id) if self.current_id in ids else 0)
+            if len(keep) > 1:          # keep a multiple selection across rescans and searches
+                sm = self.table.selectionModel()
+                flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+                for row, i in enumerate(ids):
+                    if i in keep:
+                        sm.select(self.model.index(row, 0), flags)
         else:
             self.details.clear()
         if not self.all_items:
@@ -1431,6 +1752,17 @@ class MainWindow(QMainWindow):
             QPushButton#chip:checked {{ background: {c['accent-tint']}; border: 1px solid {c['accent']};
                                         color: {c['accent-ink']}; }}
             QPushButton#chip:focus {{ border: 2px solid {c['accent']}; }}
+            #dialog {{ background: {c['surface']}; }}
+            QListWidget#diskList {{ border: 1px solid {c['line']}; border-radius: 8px; background: {c['surface']};
+                                   color: {c['ink']}; padding: 4px 0; outline: 0; }}
+            QListWidget#diskList::item {{ padding: 3px 8px; }}
+            QRadioButton {{ color: {c['ink']}; spacing: 8px; }}
+            QComboBox {{ color: {c['ink']}; background: {c['surface']}; border: 1px solid {c['control-edge']};
+                         border-radius: 8px; padding: 0 12px; }}
+            QComboBox:focus {{ border: 2px solid {c['accent']}; }}
+            QComboBox QAbstractItemView {{ color: {c['ink']}; background: {c['surface']};
+                                           selection-background-color: {c['accent-tint']};
+                                           selection-color: {c['accent-ink']}; }}
             QPushButton#small {{ min-height: 30px; padding: 0 12px; }}
             #scanBar {{ background: {c['accent-tint']}; border-radius: 8px; }}
             #scanBar QLabel {{ color: {c['accent-ink']}; }}
