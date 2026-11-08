@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 
@@ -50,10 +51,20 @@ CREATE INDEX IF NOT EXISTS ix_files_name   ON files(name COLLATE NOCASE);
 
 class Catalogue:
     def __init__(self, path):
-        self.db = sqlite3.connect(path)
+        self.db = sqlite3.connect(path, timeout=30)
         self.db.row_factory = sqlite3.Row
+        # WAL lets the window keep reading while a scan writes in the background.
+        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+        self._mark_empty()
+
+    def _mark_empty(self):
+        """Give empty files and blank disks their own status (catalogues made before 4.0.0-alpha.4
+        reported a 0-byte file as a problem and a blank disk as OK)."""
+        self.db.execute(
+            "UPDATE media SET status='empty' WHERE sha1 IN (?,?,?) AND status!='empty'", BLANK_SHA1)
+        self.db.commit()      # always: an open transaction would block other connections
 
     # ------------------------------------------------------------ writing
     def known_unchanged(self, source, size, mtime):
@@ -175,6 +186,64 @@ class Catalogue:
                 h["first_file"] = f["path"]
         return hits
 
+    # ------------------------------------------------------------ scanned folders
+    def get_meta(self, key, default=None):
+        row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        try:
+            return json.loads(row[0]) if row else default
+        except ValueError:
+            return default
+
+    def set_meta(self, key, value):
+        self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                        (key, json.dumps(value)))
+        self.db.commit()
+
+    @staticmethod
+    def _within(path, root):
+        try:
+            return os.path.commonpath([path, root]) == root
+        except ValueError:
+            return False
+
+    def _outermost(self, paths):
+        paths = sorted({os.path.normpath(p) for p in paths}, key=len)
+        out = []
+        for p in paths:
+            if not any(self._within(p, r) for r in out):
+                out.append(p)
+        return sorted(out)
+
+    def scan_roots(self):
+        """Folders (or files) this catalogue was built from, for Rescan.
+
+        Catalogues made before 4.0.0-alpha.4 did not record them; for those, the folders
+        holding the catalogued items are used.
+        """
+        roots = self.get_meta("roots")
+        if roots is not None:
+            return roots
+        found = []
+        for r in self.db.execute("SELECT source, kind FROM media WHERE parent_id IS NULL"):
+            found.append(r["source"] if r["kind"] == "folder" else os.path.dirname(r["source"]))
+        return self._outermost(found)
+
+    def add_scan_roots(self, paths):
+        self.set_meta("roots", self._outermost(list(self.scan_roots()) + list(paths)))
+
+    def remove_missing(self, roots):
+        """Drop items whose file has gone, but only under roots that still exist
+        (so an unplugged drive or unmounted share doesn't empty the catalogue)."""
+        live = [r for r in roots if os.path.exists(r)]
+        gone = []
+        for r in self.db.execute("SELECT id, number, source FROM media WHERE parent_id IS NULL"):
+            if not os.path.exists(r["source"]) and any(self._within(r["source"], x) for x in live):
+                gone.append(r)
+        for r in gone:
+            self.db.execute("DELETE FROM media WHERE id=?", (r["id"],))
+        self.db.commit()
+        return [(r["number"], r["source"]) for r in gone]
+
     def media_by_id(self, mid):
         return self.db.execute("SELECT * FROM media WHERE id=?", (mid,)).fetchone()
 
@@ -184,7 +253,7 @@ class Catalogue:
     def duplicate_images(self):
         return self.db.execute(
             """SELECT sha1, COUNT(*) n FROM media WHERE sha1 IS NOT NULL AND kind IN
-               ('adf','dms','adz','hdf','lha','lzx') AND sha1 NOT IN (?,?,?)
+               ('adf','dms','adz','hdf','lha','lzx','zip') AND sha1 NOT IN (?,?,?)
                GROUP BY sha1 HAVING n>1""", BLANK_SHA1).fetchall()
 
     def duplicate_files(self, min_size=1024, limit=100):
@@ -208,4 +277,5 @@ class Catalogue:
             "files": q("SELECT COUNT(*) FROM files WHERE is_dir=0"),
             "errors": q("SELECT COUNT(*) FROM media WHERE status='error'"),
             "warnings": q("SELECT COUNT(*) FROM media WHERE status='warning'"),
+            "empty": q("SELECT COUNT(*) FROM media WHERE status='empty'"),
         }

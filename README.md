@@ -1,11 +1,11 @@
-# TurboCAT 4 — engine preview (4.0.0-alpha.3)
+# TurboCAT 4 — engine preview (4.0.0-alpha.4)
 
 Author: David Hill
 
 The scanning engine for TurboCAT 4, the modern revival of TurboCAT /
 TurboCAT-Pro (1994–1996). Version 4 continues the original numbering: TurboCAT 3 was
 on the Amiga Shopper issue 52 coverdisk in August 1995. This preview runs from the terminal, with a first
-desktop window (catalogue list and search) under way.
+desktop window (catalogue list, search and details) under way.
 
 ## What it reads
 
@@ -17,9 +17,19 @@ desktop window (catalogue list and search) under way.
 | HDF | RDB hard drives (all OFS/FFS partitions) and single-partition images. PFS3/SFS partitions are reported but not read yet |
 | LHA | Including WHDLoad packs — game name and credits read from the `.slave` |
 | LZX | Contents listed (experimental — not yet tested on a real LZX archive) |
+| ZIP | Including TOSEC packs — the disk inside is read and listed |
 | Amiga folders | Folders used as emulator hard drives (detected by `S/Startup-Sequence` etc.) |
 
 Archives and images inside other images are opened too (up to 3 levels).
+
+## Changes in 4.0.0-alpha.4
+
+- Desktop window (`tc window`): the catalogue list with search, and a details panel for the selected item — facts, problems and warnings, duplicates (click to jump to the other copy), WHDLoad details, the full contents list or the text found on a non-DOS disk, and Show in folder
+- New **Empty** status for 0-byte files and blank (all-zero) disks, instead of Problem or OK. Existing catalogues are updated when opened
+- Empty and blank images are no longer reported as duplicates of each other
+- **Scan folder…** and **Rescan** buttons in the window (Rescan also on F5 and as `tc rescan`): rescans every folder scanned before, reading only new and changed files and removing items whose files were deleted. Runs in the background with a Stop button
+- ZIP archives are read (TOSEC packs each disk in a .zip); an archive holding a single disk is listed as that disk
+- Overdumped ADFs (TOSEC "[o]", extra tracks past the end of the disk) are read normally with a note, instead of being reported as a problem and mis-read as high density
 
 ## Changes in 4.0.0-alpha.3
 
@@ -61,6 +71,7 @@ alias tc='~/turbocat-env/bin/python -m turbocat'
 
 ```
 tc scan ~/Amiga            # scan a folder (rescans only what changed)
+tc rescan                  # rescan every folder scanned before; drops deleted files
 tc search "turrican"       # files, volumes, WHDLoad names, disk text
 tc show 12                 # everything about disk #12
 tc dups                    # duplicates

@@ -33,7 +33,7 @@ class FileEntry:
 
 @dataclass
 class ContainerResult:
-    kind: str                       # adf, adz, dms, hdf, lha, lzx, folder
+    kind: str                       # adf, adz, dms, hdf, lha, lzx, zip, folder
     volume: str = ""
     fs: str = ""
     boot: Optional[dict] = None
@@ -58,6 +58,8 @@ def detect(name: str, head: bytes, size: int) -> Optional[str]:
         return "lha"
     if head[:3] == b"LZX":
         return "lzx"
+    if head[:4] == b"PK\x03\x04":
+        return "zip"
     if head[:8] in (b"UAE-1ADF", b"UAE--ADF"):
         return "extadf"
     if head[:2] == b"\x1f\x8b" and ext in (".adz", ".gz"):
@@ -154,9 +156,24 @@ def read_adf(data: bytes, kind="adf") -> ContainerResult:
                                 f"({len(data):,} of {DD_SIZE:,} bytes); the end of the disk is missing")
             data = data + bytes(short)       # pad so whatever survives can still be listed
         else:
-            res.problems.append(f"unexpected ADF size {len(data):,} bytes "
-                                f"(expected {DD_SIZE:,} or {HD_SIZE:,})")
-            data = data[:HD_SIZE] if len(data) > HD_SIZE else data + bytes(HD_SIZE - len(data))
+            # Overdumps (TOSEC "[o]"): the whole disk plus extra tracks past the end, usually
+            # 81-84 cylinders. The disk itself is complete, so read it at its normal size.
+            base = HD_SIZE if len(data) > HD_SIZE else DD_SIZE
+            btrack = track * (2 if base == HD_SIZE else 1)
+            extra = len(data) - base
+            if extra % btrack == 0 and extra // btrack <= 10:
+                n = extra // btrack
+                tail = data[base:]
+                res.notes.append(
+                    f"overdump: {n} extra track{'s' if n != 1 else ''} past the end of the disk "
+                    + ("(they hold data - some copy-protected disks use them)"
+                       if tail.count(0) != len(tail) else "(blank)")
+                    + "; the disk itself is complete")
+                data = data[:base]
+            else:
+                res.problems.append(f"unexpected ADF size {len(data):,} bytes "
+                                    f"(expected {DD_SIZE:,} or {HD_SIZE:,})")
+                data = data[:HD_SIZE] if len(data) > HD_SIZE else data + bytes(HD_SIZE - len(data))
     hd = len(data) == HD_SIZE
     res.info["density"] = "HD" if hd else "DD"
     res.boot = bootblock.analyse(data[:1024])
@@ -331,6 +348,32 @@ def read_lha(data: bytes) -> ContainerResult:
     return res
 
 
+def read_zip(data: bytes) -> ContainerResult:
+    """ZIP archives, as used by TOSEC and most download sites (usually one image each)."""
+    import zipfile
+    res = ContainerResult("zip")
+    try:
+        arc = zipfile.ZipFile(io.BytesIO(data))
+    except Exception as ex:
+        res.problems.append(f"ZIP archive unreadable: {ex}")
+        return res
+    for info in arc.infolist():
+        name = info.filename.replace("\\", "/")
+        is_dir = info.is_dir()
+        try:
+            date = datetime.datetime(*info.date_time)
+        except ValueError:
+            date = None
+
+        def reader(i=info, a=arc):
+            return a.read(i)
+
+        res.files.append(FileEntry(name.rstrip("/"), info.file_size, date,
+                                   info.comment.decode("latin-1", "replace"), "", is_dir,
+                                   None if is_dir else reader))
+    return res
+
+
 def read_lzx(data: bytes) -> ContainerResult:
     res = ContainerResult("lzx")
     try:
@@ -389,4 +432,4 @@ def read_folder(path: str) -> ContainerResult:
 
 
 READERS = {"adf": read_adf, "dms": read_dms, "adz": read_adz,
-           "lha": read_lha, "lzx": read_lzx}
+           "lha": read_lha, "lzx": read_lzx, "zip": read_zip}

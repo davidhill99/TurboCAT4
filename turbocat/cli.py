@@ -1,6 +1,7 @@
 """Command-line front end for the TurboCAT 4 engine.
 
     python -m turbocat scan FOLDER...      scan images, archives and Amiga folders
+    python -m turbocat rescan              rescan every folder scanned before (new, changed, deleted)
     python -m turbocat search TEXT         find files, disks, WHDLoad games, disk text
     python -m turbocat show NUMBER         full details of one catalogued item
     python -m turbocat dups                duplicate images and files
@@ -22,9 +23,9 @@ from . import APP_NAME, VERSION
 from . import sets
 from .bootblock import best_title
 from .catalogue import Catalogue
-from .scanner import scan
+from .scanner import rescan_all, scan
 
-STATUS_WORD = {"ok": "OK", "warning": "Warning", "error": "Problem"}
+STATUS_WORD = {"ok": "OK", "warning": "Warning", "error": "Problem", "empty": "Empty"}
 DEFAULT_DB = os.path.join(os.path.expanduser("~"), "turbocat.db")
 
 
@@ -60,11 +61,23 @@ def cmd_scan(cat, a):
     cmd_stats(cat, a)
 
 
+def cmd_rescan(cat, a):
+    print(f"{APP_NAME} {VERSION} - rescanning:")
+    for r in cat.scan_roots():
+        print(f"  {r}")
+    s = rescan_all(cat)
+    print(f"\nNew or changed {s['scanned']}, unchanged {s['skipped']}, "
+          f"removed {len(s['removed'])}, not Amiga files {s['ignored']}.")
+    for num, src in s["removed"]:
+        print(f"  removed #{num:04d} {src} (file no longer there)")
+    cmd_stats(cat, a)
+
+
 def cmd_stats(cat, a):
     st = cat.stats()
     print(f"Catalogue: {st['items']} items ({st['containers']} including archives/images "
           f"inside them), {st['files']} files. Problems: {st['errors']}, "
-          f"warnings: {st['warnings']}.")
+          f"warnings: {st['warnings']}, empty images: {st['empty']}.")
 
 
 def cmd_search(cat, a):
@@ -110,7 +123,10 @@ def cmd_show(cat, a):
             print(f"  Note: {n}")
         if m["whd_name"]:
             print(f"  WHDLoad game: {m['whd_name']}  {m['whd_copy']}")
-        for p in _j(m["problems"], []):
+        if m["status"] == "empty":
+            print("  Empty: " + ("0-byte file, no disk data" if not m["size"]
+                                 else "blank disk, every track is empty"))
+        for p in _j(m["problems"], []) if m["status"] != "empty" else []:
             print(f"  PROBLEM: {p}")
         for w in _j(m["warnings"], []):
             print(f"  Warning: {w}")
@@ -200,7 +216,11 @@ def cmd_sets(cat, a):
 
 
 def cmd_problems(cat, a):
-    rows = cat.db.execute("SELECT * FROM media WHERE status!='ok' ORDER BY id").fetchall()
+    rows = cat.db.execute("SELECT * FROM media WHERE status IN ('error','warning') "
+                          "ORDER BY id").fetchall()
+    empty = cat.stats()["empty"]
+    if empty:
+        print(f"{empty} empty image(s) - 0-byte files or blank disks - not listed here.\n")
     if not rows:
         print("No problems found.")
         return
@@ -227,7 +247,7 @@ def cmd_export(cat, a):
                         "Bootblock", "Files", "Folder"])
             for m in cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number"):
                 title = m["whd_name"] or m["volume"] or best_title(_j(m["text"], []))[:60]
-                if not title and m["kind"] in ("lha", "lzx"):
+                if not title and m["kind"] in ("lha", "lzx", "zip"):
                     first = cat.db.execute("SELECT path FROM files WHERE media_id=? ORDER BY id "
                                            "LIMIT 1", (m["id"],)).fetchone()
                     title = first["path"].split("/")[0] if first else ""
@@ -252,6 +272,7 @@ def main(argv=None):
     sub.add_parser("problems")
     p = sub.add_parser("sets"); p.add_argument("--all", action="store_true", help="list complete sets too")
     sub.add_parser("stats")
+    sub.add_parser("rescan", help="rescan every folder scanned before")
     p = sub.add_parser("export"); p.add_argument("what", choices=["csv", "disks"]); p.add_argument("file")
     sub.add_parser("window", help="open the desktop window")
     a = ap.parse_args(argv)
@@ -264,7 +285,7 @@ def main(argv=None):
             return 1
         return run(a.db)
     cat = Catalogue(a.db)
-    {"scan": cmd_scan, "search": cmd_search, "show": cmd_show, "dups": cmd_dups,
+    {"scan": cmd_scan, "rescan": cmd_rescan, "search": cmd_search, "show": cmd_show, "dups": cmd_dups,
      "problems": cmd_problems, "stats": cmd_stats, "export": cmd_export,
      "sets": cmd_sets}[a.cmd](cat, a)
 

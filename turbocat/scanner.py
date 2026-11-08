@@ -4,6 +4,7 @@ import hashlib
 import os
 
 from . import readers, whdload
+from .catalogue import BLANK_SHA1
 from .readers import detect, ContainerResult
 
 MAX_DEPTH = 3                # containers inside containers (e.g. ADF in LHA in HDF)
@@ -106,15 +107,29 @@ def analyse_container(kind, data, name, source, depth, catalogue, parent_id, num
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
             rec["sha1"] = h.hexdigest()
+    if rec["sha1"] in BLANK_SHA1:
+        rec["status"] = "empty"
     mid = catalogue.add_media(rec, parent_id, number)
     for k, content, p in inner:
         analyse_container(k, content, p, source, depth + 1, catalogue, mid)
     return mid, res
 
 
+def rescan_all(catalogue, progress=print):
+    """Rescan every folder the catalogue was built from: new and changed files are read,
+    unchanged ones skipped, and items whose files have been deleted are removed."""
+    roots = catalogue.scan_roots()
+    summary = scan(roots, catalogue, progress=progress)
+    summary["removed"] = catalogue.remove_missing(roots)
+    summary["roots"] = roots
+    return summary
+
+
 def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=False):
     """Scan files and folders. Returns a summary dict."""
     summary = {"scanned": 0, "skipped": 0, "ignored": 0}
+    found = [os.path.abspath(os.path.expanduser(p)) for p in paths]
+    catalogue.add_scan_roots([p for p in found if os.path.exists(p)])
     todo = []
     for p in paths:
         p = os.path.abspath(os.path.expanduser(p))
@@ -163,11 +178,13 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
         if kind not in ("hdf", "folder"):
             with open(path, "rb") as fh:
                 data = fh.read()
-        _, res = analyse_container(kind, data, os.path.basename(path), path, 0, catalogue,
+        mid, res = analyse_container(kind, data, os.path.basename(path), path, 0, catalogue,
                                    None, number, path_on_disk=path)
         catalogue.commit()
         summary["scanned"] += 1
         if progress:
-            flag = {"ok": "", "warning": "  [warning]", "error": "  [PROBLEM]"}[_status(res)]
+            status = catalogue.media_by_id(mid)["status"]
+            flag = {"ok": "", "warning": "  [warning]", "error": "  [PROBLEM]",
+                    "empty": "  [empty]"}[status]
             progress(f"#{number:04d} {kind.upper():6} {os.path.basename(path)}{flag}")
     return summary
