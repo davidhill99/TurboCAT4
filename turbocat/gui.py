@@ -837,6 +837,7 @@ class ScanStopped(Exception):
 class ScanWorker(QThread):
     """Runs a scan or rescan with its own database connection, off the window's thread."""
     line = Signal(str)
+    step = Signal(str, int, int, object, object, str)   # phase, done, total, bytes done, bytes total, path
     done = Signal(dict)
     failed = Signal(str)
 
@@ -851,14 +852,19 @@ class ScanWorker(QThread):
         if self.stop_wanted:
             raise ScanStopped()
 
+    def _step(self, phase, done, total, done_bytes, total_bytes, path):
+        self.step.emit(phase, done, total, done_bytes, total_bytes, path)
+        if self.stop_wanted:
+            raise ScanStopped()
+
     def run(self):
         cat = None
         try:
             cat = Catalogue(self.db_path)
             if self.folders is None:
-                s = rescan_all(cat, progress=self._progress)
+                s = rescan_all(cat, progress=self._progress, step=self._step)
             else:
-                s = scan(self.folders, cat, progress=self._progress)
+                s = scan(self.folders, cat, progress=self._progress, step=self._step)
                 s["removed"] = []
             self.done.emit(s)
         except ScanStopped:
@@ -940,17 +946,22 @@ class MainWindow(QMainWindow):
         sb.setSpacing(12)
         self.scan_busy = QProgressBar()
         self.scan_busy.setRange(0, 0)
-        self.scan_busy.setFixedWidth(120)
+        self.scan_busy.setFixedWidth(220)
         self.scan_busy.setTextVisible(False)
         self.scan_text = QLabel()
-        self.scan_text.setFont(ui_font(13))
-        self.scan_text.setMinimumWidth(40)
+        self.scan_text.setFont(ui_font(13, QFont.Weight.DemiBold))
+        self.scan_file = QLabel()
+        self.scan_file.setObjectName("scanFile")
+        self.scan_file.setFont(ui_font(12))
+        self.scan_file.setMinimumWidth(40)
+        self.scan_file.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.stop_btn.setObjectName("small")
         self.stop_btn.clicked.connect(self.stop_scan)
         sb.addWidget(self.scan_busy)
-        sb.addWidget(self.scan_text, 1)
+        sb.addWidget(self.scan_text)
+        sb.addWidget(self.scan_file, 1)
         sb.addWidget(self.stop_btn)
         self.scan_bar.hide()
         sl.addWidget(self.scan_bar)
@@ -1103,6 +1114,9 @@ class MainWindow(QMainWindow):
             return
         self.hide_bar.stop()
         self.scan_text.setText(text)
+        self.scan_file.setText("")
+        self.scan_busy.setRange(0, 0)          # busy until the first progress report
+        self.read_started = None
         self.scan_busy.show()
         self.stop_btn.show()
         self.stop_btn.setEnabled(True)
@@ -1112,6 +1126,7 @@ class MainWindow(QMainWindow):
         self.found_count = 0
         self.worker = ScanWorker(self.db_path, folders)
         self.worker.line.connect(self._scan_line)
+        self.worker.step.connect(self._scan_step)
         self.worker.done.connect(self._scan_done)
         self.worker.failed.connect(self._scan_failed)
         self.worker.finished.connect(self._scan_finished)
@@ -1123,13 +1138,49 @@ class MainWindow(QMainWindow):
             self.worker.stop_wanted = True
             self.stop_btn.setEnabled(False)
             self.scan_text.setText("Stopping after the current file…")
+            self.scan_file.setText("")
 
     def _scan_line(self, text):
         if text.startswith("#"):
             self.found_count += 1
-            text = f"{self.found_count:,} read · " + text.split(" ", 2)[-1].strip()
-        if not self.worker.stop_wanted:
-            self.scan_text.setText(text)
+
+    @staticmethod
+    def _time_left(seconds):
+        if seconds < 60:
+            return "less than a minute left"
+        minutes = int(seconds // 60) + 1
+        if minutes < 90:
+            return f"about {minutes} min left"
+        return f"about {minutes // 60} h {minutes % 60} min left"
+
+    def _scan_step(self, phase, done, total, done_bytes, total_bytes, path):
+        if self.worker is None or self.worker.stop_wanted:
+            return
+        self.scan_busy.setRange(0, 1000)
+        if phase == "checking":
+            self.scan_busy.setValue(int(1000 * done / total) if total else 0)
+            self.scan_text.setText(f"Looking for new and changed files… {done:,} of {total:,}")
+        else:
+            if self.read_started is None:
+                self.read_started = (time.monotonic(), done_bytes)
+            if not total:
+                self.scan_busy.setValue(1000)
+                self.scan_text.setText("Nothing new or changed")
+            else:
+                frac = done_bytes / total_bytes if total_bytes else done / total
+                self.scan_busy.setValue(int(1000 * frac))
+                text = f"Reading {min(done + 1, total):,} of {total:,} new or changed · {frac:.0%}"
+                t0, b0 = self.read_started
+                elapsed = time.monotonic() - t0
+                if elapsed >= 3 and done_bytes > b0 and done < total:
+                    rate = (done_bytes - b0) / elapsed
+                    text += " · " + self._time_left((total_bytes - done_bytes) / rate)
+                self.scan_text.setText(text)
+        name = os.path.basename(path) if path else ""
+        fm = QFontMetrics(self.scan_file.font())
+        self.scan_file.setText(fm.elidedText(name, Qt.TextElideMode.ElideMiddle,
+                                             max(40, self.scan_file.width())))
+        self.scan_file.setToolTip(path)
 
     def _scan_done(self, s):
         if s.get("stopped"):
@@ -1148,6 +1199,7 @@ class MainWindow(QMainWindow):
 
     def _show_result(self, msg):
         self.scan_text.setText(msg)
+        self.scan_file.setText("")
         self.scan_busy.hide()
         self.stop_btn.hide()
         self.reload()
@@ -1263,7 +1315,7 @@ class MainWindow(QMainWindow):
                            border-radius: 8px; padding: 0 14px; min-height: 42px; }}
             QPushButton:hover {{ background: {c['chrome']}; }}
             QPushButton:focus {{ border: 2px solid {c['accent']}; }}
-            QPushButton:disabled {{ color: {c['ink-muted']}; border-color: {c['line']}; }}
+            QPushButton:disabled {{ color: {c['ink-muted']}; border-color: {c['line']}; background: {c['chrome']}; }}
             QPushButton#primary {{ background: {c['accent']}; border: 1px solid {c['accent']}; color: {c['on-accent']};
                                    padding: 0 18px; min-height: 42px; }}
             QPushButton#primary:hover {{ background: {c['accent-ink']}; }}
@@ -1272,6 +1324,7 @@ class MainWindow(QMainWindow):
             QPushButton#small {{ min-height: 30px; padding: 0 12px; }}
             #scanBar {{ background: {c['accent-tint']}; border-radius: 8px; }}
             #scanBar QLabel {{ color: {c['accent-ink']}; }}
+            #scanBar QLabel#scanFile {{ color: {c['ink-muted']}; }}
             QProgressBar {{ border: none; background: {c['surface']}; border-radius: 3px; max-height: 6px; }}
             QProgressBar::chunk {{ background: {c['accent']}; border-radius: 3px; }}
             QScrollBar:vertical {{ background: {c['surface']}; width: 12px; margin: 0; }}

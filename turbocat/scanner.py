@@ -9,6 +9,7 @@ from .readers import detect, ContainerResult
 
 MAX_DEPTH = 3                # containers inside containers (e.g. ADF in LHA in HDF)
 MAX_INNER_SIZE = 64 << 20    # don't unpack inner images larger than this
+FOLDER_WEIGHT = 1 << 20      # Amiga folders: size unknown until read; count as 1 MB for progress
 
 
 def _sha1(b: bytes) -> str:
@@ -115,18 +116,23 @@ def analyse_container(kind, data, name, source, depth, catalogue, parent_id, num
     return mid, res
 
 
-def rescan_all(catalogue, progress=print):
+def rescan_all(catalogue, progress=print, step=None):
     """Rescan every folder the catalogue was built from: new and changed files are read,
     unchanged ones skipped, and items whose files have been deleted are removed."""
     roots = catalogue.scan_roots()
-    summary = scan(roots, catalogue, progress=progress)
+    summary = scan(roots, catalogue, progress=progress, step=step)
     summary["removed"] = catalogue.remove_missing(roots)
     summary["roots"] = roots
     return summary
 
 
-def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=False):
-    """Scan files and folders. Returns a summary dict."""
+def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=False, step=None):
+    """Scan files and folders. Returns a summary dict.
+
+    progress(text) gets a line per item read. step(phase, done, total, done_bytes,
+    total_bytes, path), if given, is called often enough to drive a progress bar: phase
+    "checking" while working out what is new or changed, then "reading".
+    """
     summary = {"scanned": 0, "skipped": 0, "ignored": 0}
     found = [os.path.abspath(os.path.expanduser(p)) for p in paths]
     catalogue.add_scan_roots([p for p in found if os.path.exists(p)])
@@ -157,34 +163,59 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
         else:
             todo.append((None, p))
 
-    for kind, path in todo:
+    # Pass 1 - decide what needs reading. Cheap: a size and date check for files already
+    # catalogued, and the first 1 KB of anything new to recognise it.
+    work = []
+    for i, (kind, path) in enumerate(todo):
+        if step and i % 25 == 0:
+            step("checking", i, len(todo), 0, 0, path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            summary["ignored"] += 1
+            continue
         if kind == "folder":
-            st = os.stat(path)
-            size, mtime = 0, st.st_mtime
-        else:
-            st = os.stat(path)
-            size, mtime = st.st_size, st.st_mtime
-            with open(path, "rb") as fh:
-                head = fh.read(1024)
-            kind = detect(path, head, size)
-            if kind is None:
-                summary["ignored"] += 1
-                continue
-        if not rescan and kind != "folder" and catalogue.known_unchanged(path, size, mtime):
+            work.append(("folder", path, FOLDER_WEIGHT))
+            continue
+        size, mtime = st.st_size, st.st_mtime
+        if not rescan and catalogue.known_unchanged(path, size, mtime):
             summary["skipped"] += 1
             continue
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(1024)
+        except OSError:
+            summary["ignored"] += 1
+            continue
+        kind = detect(path, head, size)
+        if kind is None:
+            summary["ignored"] += 1
+            continue
+        work.append((kind, path, size))
+
+    # Pass 2 - read them, reporting progress by bytes so big images count for more.
+    total_bytes = sum(w[2] for w in work)
+    done_bytes = 0
+    if step:
+        step("reading", 0, len(work), 0, total_bytes, "")
+    for i, (kind, path, size) in enumerate(work):
+        if step:
+            step("reading", i, len(work), done_bytes, total_bytes, path)
         number = catalogue.remove_source(path) or catalogue.next_number()
         data = None
         if kind not in ("hdf", "folder"):
             with open(path, "rb") as fh:
                 data = fh.read()
         mid, res = analyse_container(kind, data, os.path.basename(path), path, 0, catalogue,
-                                   None, number, path_on_disk=path)
+                                     None, number, path_on_disk=path)
         catalogue.commit()
         summary["scanned"] += 1
+        done_bytes += size
         if progress:
             status = catalogue.media_by_id(mid)["status"]
             flag = {"ok": "", "warning": "  [warning]", "error": "  [PROBLEM]",
                     "empty": "  [empty]"}[status]
             progress(f"#{number:04d} {kind.upper():6} {os.path.basename(path)}{flag}")
+    if step:
+        step("reading", len(work), len(work), total_bytes, total_bytes, "")
     return summary

@@ -28,6 +28,7 @@ Archives and images inside other images are opened too (up to 3 levels).
 - New **Empty** status for 0-byte files and blank (all-zero) disks, instead of Problem or OK. Existing catalogues are updated when opened
 - Empty and blank images are no longer reported as duplicates of each other
 - **Scan folder…** and **Rescan** buttons in the window (Rescan also on F5 and as `tc rescan`): rescans every folder scanned before, reading only new and changed files and removing items whose files were deleted. Runs in the background with a Stop button
+- Scans show a progress bar: how many new or changed files are left, the time remaining, and the file being read. Unchanged files are skipped without being read, so a rescan with nothing new is almost instant
 - ZIP archives are read (TOSEC packs each disk in a .zip); an archive holding a single disk is listed as that disk
 - Overdumped ADFs (TOSEC "[o]", extra tracks past the end of the disk) are read normally with a note, instead of being reported as a problem and mis-read as high density
 
