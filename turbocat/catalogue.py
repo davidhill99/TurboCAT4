@@ -1,8 +1,13 @@
 """The TurboCAT 4 catalogue: a single SQLite database file."""
 
+import hashlib
 import json
 import sqlite3
 import time
+
+# Images with no data all share a fingerprint, so they would show up as "duplicates"
+# of each other: an empty file, and blank (all-zero) DD and HD disks.
+BLANK_SHA1 = tuple(hashlib.sha1(bytes(n)).hexdigest() for n in (0, 901120, 1802240))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -179,7 +184,8 @@ class Catalogue:
     def duplicate_images(self):
         return self.db.execute(
             """SELECT sha1, COUNT(*) n FROM media WHERE sha1 IS NOT NULL AND kind IN
-               ('adf','dms','adz','hdf','lha','lzx') GROUP BY sha1 HAVING n>1""").fetchall()
+               ('adf','dms','adz','hdf','lha','lzx') AND sha1 NOT IN (?,?,?)
+               GROUP BY sha1 HAVING n>1""", BLANK_SHA1).fetchall()
 
     def duplicate_files(self, min_size=1024, limit=100):
         return self.db.execute(
