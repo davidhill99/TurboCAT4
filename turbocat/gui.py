@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 from . import APP_NAME, VERSION
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
-from . import emulator, games, gotek, music, pictures, turboview
+from . import dups as dupes, emulator, games, gotek, music, pictures, turboview
 from .scanner import rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
@@ -81,7 +81,7 @@ FILTERS = [
     ("music", "Music", "music", lambda it: it.music > 0),
     ("problems", "Problems", "problem", lambda it: it.status == "error"),
     ("warnings", "Warnings", "warning", lambda it: it.status == "warning"),
-    ("dups", "Duplicates", "duplicate", lambda it: it.dup),
+    ("dups", "Duplicates", "duplicate", lambda it: it.copies > 1),
     ("whd", "WHDLoad games", "game", lambda it: it.type == "WHDLoad"),
     ("nondos", "Non-DOS disks", "disk", lambda it: it.non_dos),
     ("hd", "Hard drives", "harddrive", lambda it: it.hard_drive),
@@ -175,9 +175,13 @@ class Item:
     files: str
     status: str
     sha1: str = ""
-    dup: bool = False
+    dup: bool = False           # the same disk is catalogued more than once
     found: str = ""
-    dup_shas: frozenset = frozenset()
+    dup_key: str = ""           # content fingerprint: the disk itself, whatever it is wrapped in
+    copies: int = 1             # how many copies of this disk there are
+    spare_of: int = 0           # a spare copy: the id of the copy TurboCAT keeps (and shows)
+    spares: tuple = ()          # the copy kept: ids of its hidden spares
+    shares: frozenset = frozenset()   # fingerprints of archives/disks it shares with other items
     non_dos: bool = False
     hard_drive: bool = False
     thumb_icon: str = ""        # the disk's own Workbench icon (PNG path)
@@ -192,7 +196,7 @@ class Item:
 
 def load_items(cat):
     rows = cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number").fetchall()
-    dup_sha = {r["sha1"] for r in cat.duplicate_images()}
+    shared_sha = {r["sha1"] for r in cat.duplicate_images()}
     thumbs = pictures.thumbs_by_key(cat)
     game_why = games.classify(cat)
     tunes = {k: len(v) for k, v in pictures.music_by_key(cat).items()}
@@ -249,13 +253,16 @@ def load_items(cat):
         files = f"{n:,}" if n or (disk["volume"] and not non_dos) else "—"
         if status == "empty":
             files = "—"
-        shas = {r["sha1"] for r in [m] + kids if r["kind"] in IMAGE_KINDS}
-        dups = frozenset(shas & dup_sha)
+        # Things inside it that also turn up elsewhere (not counting the item's own disk,
+        # which is what makes a true duplicate).
+        own_key = disk["sha1"] or m["sha1"] or ""
+        shares = frozenset({r["sha1"] for r in kids if r["kind"] in IMAGE_KINDS} & shared_sha
+                           - {own_key})
         th = thumbs.get(pictures.item_key(m))
         items.append(Item(
             id=m["id"], number=m["number"] or 0, file=os.path.basename(m["source"].rstrip("/")),
             path=m["source"], type=typ, icon=ico, title=title, from_text=from_text, files=files,
-            status=status, sha1=disk["sha1"] or m["sha1"] or "", dup=bool(dups), dup_shas=dups,
+            status=status, sha1=own_key, dup_key=own_key if dkind != "folder" else "", shares=shares,
             non_dos=non_dos and status != "empty",
             hard_drive=dkind in ("hdf", "folder") or any(k["kind"] == "hdf" for k in kids),
             thumb_icon=pictures.picture_path(th["icon"]) or "" if th else "",
@@ -264,6 +271,7 @@ def load_items(cat):
             pic_origin=(th["origin"] or "") if th else "",
             game=game_why.get(m["id"], ""),
             key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0)))
+    dupes.mark(items, cat)
     return items
 
 
@@ -313,8 +321,16 @@ class ItemModel(QAbstractTableModel):
                 return it.title + (f"\nFound: {it.found}" if it.found else "")
             if col == 3:
                 return it.files
-            return STATUS.get(it.status, STATUS["ok"])[0] + (" · Duplicate" if it.dup else "")
+            return STATUS.get(it.status, STATUS["ok"])[0] + _dup_word(it, long=True)
         return None
+
+
+def _dup_word(it, long=False):
+    """The duplicate pill: "Spare copy" on a hidden spare, "2 copies" on the copy kept."""
+    if it.copies < 2:
+        return ""
+    word = "Spare copy" if it.spare_of else f"{it.copies} copies"
+    return f" · {word}" if long else word
 
 
 TUNE_COLUMNS = ["TUNE", "FORMAT", "SIZE", "LENGTH", "NO.", "WHERE"]
@@ -461,8 +477,8 @@ class RowDelegate(QStyledItemDelegate):
         else:
             word, fg, bg, ico = STATUS.get(it.status, STATUS["ok"])
             px = self._pill(p, x, r, word, C[fg], C[bg], ico)
-            if it.dup:
-                self._pill(p, px + 6, r, "Duplicate", C["ink-soft"], C["neutral-tint"], "duplicate")
+            if it.copies > 1:
+                self._pill(p, px + 6, r, _dup_word(it), C["ink-soft"], C["neutral-tint"], "duplicate")
         p.restore()
 
     def _pill(self, p, x, r, text, fg, bg, ico):
@@ -525,7 +541,7 @@ class RowDelegate(QStyledItemDelegate):
             elif col == 3:
                 w = QFontMetrics(data_font(13)).horizontalAdvance(it.files)
             else:
-                w = 120 + (110 if it.dup else 0)
+                w = 120 + (130 if it.copies > 1 else 0)
         return QSize(w + 2 * self.PAD + 4, 56)
 
 
@@ -715,6 +731,7 @@ class DetailsPanel(QFrame):
         super().__init__()
         self.cat = cat
         self.on_select_number = on_select_number
+        self.on_keep = None          # keep this copy of a duplicate (set by the window)
         self.source = None
         self.item_id = None
         self.setObjectName("details")
@@ -889,6 +906,15 @@ class DetailsPanel(QFrame):
         else:
             pic.hide()
 
+    def _note_link(self, href):
+        """Links in notes: an item number to jump to, or keep:<id> to keep that copy."""
+        if href.startswith("keep:"):
+            m = self.cat.media_by_id(int(href[5:]))
+            if m is not None and self.on_keep:
+                self.on_keep(m)
+        else:
+            self.on_select_number(int(href))
+
     def show_item(self, item):
         m = self.cat.media_by_id(item.id)
         if m is None:
@@ -998,22 +1024,52 @@ class DetailsPanel(QFrame):
                     "neutral", None, "<b>Blank disk</b> — every track is empty (all zeros).",
                     ["Either nothing was ever written to this disk, or the data was lost when "
                      "the image was made or copied."]))
-        if item.dup and item.sha1:
-            own = {m["id"]} | {k["id"] for k in kids}
-            others = [r for r in self.cat.media_with_sha1(item.sha1) if r["id"] not in own]
-            links = []
-            for r in others[:6]:
-                num = self.cat.top_number(r)
-                name = os.path.basename(self.cat.label(r).split(" > ", 1)[0])
-                if r["parent_id"]:
-                    name += " › " + r["inner_path"]
-                links.append(f"<a href='{num}' style='color:{C['accent'].name()}'>"
-                             f"#{num:04d} {_esc(name)}</a>")
-            more = f" and {len(others) - 6} more" if len(others) > 6 else ""
+        acc = C['accent'].name()
+
+        def where(r):
+            """#0045 Mods_B1.DMS, and the folder it is in."""
+            num = self.cat.top_number(r)
+            name = os.path.basename(self.cat.label(r).split(" > ", 1)[0])
+            if r["parent_id"]:
+                name += " › " + r["inner_path"]
+            return f"<a href='{num}' style='color:{acc}'>#{num:04d} {_esc(name)}</a>"
+
+        def folder(r):
+            return _esc(os.path.dirname(r["source"]).replace(os.path.expanduser("~"), "~"))
+
+        if item.copies > 1 and item.spare_of:
+            keep = self.cat.media_by_id(item.spare_of)
+            if keep is not None:
+                self.notes.addWidget(Note(
+                    "neutral", "duplicate",
+                    f"<b>Spare copy</b> of {where(keep)}, in {folder(keep)}. They are the same disk, "
+                    f"so TurboCAT shows that copy and hides this one. Nothing is deleted: this file "
+                    f"stays where it is.<br><a href='keep:{item.id}' style='color:{acc}'>"
+                    f"Keep this copy instead</a>", on_link=self._note_link))
+        elif item.copies > 1:
+            rows = [r for r in (self.cat.media_by_id(i) for i in item.spares) if r is not None]
+            spares = "<br>".join(f"{where(r)} in {folder(r)} · <a href='keep:{r['id']}' "
+                                 f"style='color:{acc}'>keep that one instead</a>" for r in rows[:6])
+            more = f"<br>and {len(rows) - 6} more" if len(rows) > 6 else ""
             self.notes.addWidget(Note(
                 "accent", "duplicate",
-                f"<b>Duplicate:</b> same disk as {', '.join(links)}{more}. You only need to keep one.",
-                on_link=lambda n: self.on_select_number(int(n))))
+                f"<b>{item.copies} copies of this disk.</b> TurboCAT shows this one and hides the "
+                f"spare{'s' if len(rows) != 1 else ''} (nothing is deleted):<br>{spares}{more}",
+                on_link=self._note_link))
+        if item.shares:
+            own = {m["id"]} | {k["id"] for k in kids}
+            mine = {k["sha1"]: k for k in kids if k["sha1"] in item.shares}
+            lines = []
+            for sha, k in list(mine.items())[:3]:
+                others = [r for r in self.cat.media_with_sha1(sha) if r["id"] not in own]
+                if others:
+                    lines.append(f"{_esc(k['inner_path'])} is also in " + ", ".join(where(r) for r in others[:3]))
+            if lines:
+                self.notes.addWidget(Note(
+                    "neutral", "duplicate",
+                    "<b>Shares files with other disks.</b> The same archive is on more than one "
+                    "disk, but the disks themselves are different, so both are kept.<br>"
+                    + "<br>".join(lines), on_link=self._note_link))
         if item.game and not m["whd_name"]:
             self.notes.addWidget(Note("neutral", "game", f"<b>Game</b> — {_esc(item.game)}"))
         if m["whd_name"]:
@@ -2267,6 +2323,7 @@ class MainWindow(QMainWindow):
         pl.addWidget(self.stack)
         self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek, self.find_online,
                                     self.play_music, self.play_in_emulator)
+        self.details.on_keep = self.keep_copy
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("split")
         split.setHandleWidth(20)
@@ -2316,6 +2373,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.bar_mode = "scan"
         self.pic_asked = self.pic_shown = False
+        self.spares_hidden = 0
         self.hide_bar = QTimer(self, singleShot=True, interval=10000)
         self.hide_bar.timeout.connect(self.scan_bar.hide)
         self.live = QTimer(self, interval=4000)      # show new items while a scan runs
@@ -2418,6 +2476,18 @@ class MainWindow(QMainWindow):
             for a in (self.act_play, self.act_gotek, self.act_folder):
                 a.setEnabled(bool(ids))
 
+    def keep_copy(self, m):
+        """Keep this copy of a duplicate disk: it is shown, the others become spares."""
+        it = next((x for x in self.all_items if x.id == m["id"]), None)
+        if it is None or not it.dup_key:
+            return
+        dupes.choose(self.cat, it.dup_key, it.path)
+        self.reload()
+        self.select_number(it.number)
+        self.result_label.setText(f"Keeping #{it.number:04d} {it.file}; the other "
+                                  f"cop{'y is' if it.copies == 2 else 'ies are'} now spare "
+                                  f"(nothing is deleted)")
+
     def show_about(self):
         dlg = AboutDialog(self, self.cat, self.db_path)
         dlg.exec()
@@ -2492,13 +2562,14 @@ class MainWindow(QMainWindow):
 
     def select_number(self, number):
         """Select item #number, clearing the search if it is filtered out (used by links)."""
-        for _ in range(2):
+        for attempt in range(3):
             for row, it in enumerate(self.model.items):
                 if it.number == number:
                     self._select_row(row)
                     return
-            self.filter = "all"
-            self.chips["all"][0].setChecked(True)
+            # Not on show: clear the search and chips; a hidden spare copy is in Duplicates.
+            self.filter = "all" if attempt == 0 else "dups"
+            self.chips[self.filter][0].setChecked(True)
             self.search.edit.clear()
             self.run_search()
 
@@ -2507,13 +2578,14 @@ class MainWindow(QMainWindow):
         self.chips[key][0].setChecked(True)
         self.run_search()
 
-    def _fill_chips(self, matched):
-        """Show each chip's count within the current search; hide empty ones."""
+    def _fill_chips(self, matched, everything=None):
+        """Show each chip's count within the current search; hide empty ones.
+        matched: what the list shows (spares hidden); everything: spares too."""
         for key, (b, label) in self.chips.items():
             hits = [it for it in matched if FILTER_TEST[key](it)]
             if key == "dups":
-                n = len(set().union(*(it.dup_shas for it in hits)))
-                b.setText(f"{label}  {n:,} set{'s' if n != 1 else ''}")
+                n = len({it.dup_key for it in (everything or matched) if it.copies > 1})
+                b.setText(f"{label}  {n:,}")
             else:
                 n = len(hits)
                 b.setText(f"{label}  {n:,}")
@@ -2861,10 +2933,25 @@ class MainWindow(QMainWindow):
                                + (f" and {more:,} more file{'s' if more > 1 else ''}" if more else ""))
                 it.found = " · ".join(why) if why else "image file name"
                 shown.append(it)
-        self._fill_chips(shown)
+        # Spare copies of a duplicate stay out of sight, except in the Duplicates view, or when a
+        # search finds the spare but not the copy kept (it was found by its own file name).
+        found_ids = {it.id for it in shown}
+        everything = shown
+        shown = [it for it in shown if not it.spare_of or (text and it.spare_of not in found_ids)]
+        self.spares_hidden = len(everything) - len(shown)
+        self._fill_chips(shown, everything)
         matched = len(shown)
         test = FILTER_TEST[self.filter]
-        shown = [it for it in shown if test(it)]
+        if self.filter == "dups":
+            # Each set together: the copy kept, then its spares.
+            first = {}
+            for it in everything:
+                if it.copies > 1:
+                    first[it.dup_key] = min(first.get(it.dup_key, it.number), it.number)
+            shown = sorted((it for it in everything if test(it)),
+                           key=lambda it: (first[it.dup_key], bool(it.spare_of), it.number))
+        else:
+            shown = [it for it in shown if test(it)]
         label = dict((k, l) for k, l, _, _ in FILTERS)[self.filter]
         if self.filter == "music":
             label = "Items with music"
@@ -2874,10 +2961,17 @@ class MainWindow(QMainWindow):
         elif text:
             self.result_label.setText(
                 f"{len(shown):,} of {len(self.all_items):,} items match “{text}”")
+        elif self.filter == "dups":
+            sets = len({it.dup_key for it in shown})
+            self.result_label.setText(
+                f"{_n(sets, 'disk')} catalogued more than once · TurboCAT shows one copy of each and "
+                f"hides the {_n(len(shown) - sets, 'spare')} · nothing is deleted")
         elif self.filter != "all":
             self.result_label.setText(f"{label} {len(shown):,} of {len(self.all_items):,} items")
         else:
-            self.result_label.setText(f"All items {len(shown):,}")
+            self.result_label.setText(f"All items {len(shown):,}" + (
+                f" · {_n(self.spares_hidden, 'spare copy')} hidden (see Duplicates)"
+                .replace("copys", "copies") if self.spares_hidden else ""))
         keep = set(self.selected_ids()) if self.model.items else set()
         self.model.set_items(shown)
         if shown:
