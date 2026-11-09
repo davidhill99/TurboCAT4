@@ -189,12 +189,34 @@ def disk_files(cat, top_ids, whole_sets=True):
 
 # ---------------------------------------------------------------- starting
 
-def command(emulator, base, model, rom, files, whdload=None, mounts=()):
+# How big the emulator shows the Amiga. The picture keeps the Amiga's shape (no stretching to
+# widescreen) and is centred.
+DISPLAYS = {"window": "In a window", "1080p": "1080p window (1920 × 1080)",
+            "fullscreen": "Full screen"}
+
+
+def display_args(emulator, display):
+    if emulator == "amiberry":
+        shape = ["-s", "gfx_keep_aspect=true", "-s", "gfx_center_horizontal=smart",
+                 "-s", "gfx_center_vertical=smart"]
+        if display == "1080p":
+            return ["-s", "gfx_width_windowed=1920", "-s", "gfx_height_windowed=1080"] + shape
+        if display == "fullscreen":
+            return ["-s", "gfx_fullscreen_amiga=fullwindow"] + shape     # borderless, at the screen's size
+        return []
+    if display == "1080p":
+        return ["--window_width=1920", "--window_height=1080", "--keep_aspect=1"]
+    if display == "fullscreen":
+        return ["--fullscreen=1", "--fullscreen_mode=fullscreen-window", "--keep_aspect=1"]
+    return []
+
+def command(emulator, base, model, rom, files, whdload=None, mounts=(), display="window"):
     """The command line that starts `emulator` with these disks. mounts: [(volume, folder)]."""
     if emulator == "amiberry":
         cmd = list(base) + ["--model", model, "-G"]
         if rom:
             cmd += ["-r", rom]
+        cmd += display_args(emulator, display)
         if whdload:
             return cmd + ["--autoload", whdload]
         for i, f in enumerate(files[:2]):
@@ -204,7 +226,7 @@ def command(emulator, base, model, rom, files, whdload=None, mounts=()):
         for vol, folder in mounts:
             cmd += ["-s", f"filesystem2=rw,{vol}:{vol}:{folder},-128"]
         return cmd
-    cmd = list(base) + [f"--amiga_model={model}"]
+    cmd = list(base) + [f"--amiga_model={model}"] + display_args(emulator, display)
     if rom:
         cmd.append(f"--kickstart_file={rom}")
     for i, f in enumerate(files[:2]):
@@ -217,7 +239,7 @@ def command(emulator, base, model, rom, files, whdload=None, mounts=()):
     return cmd
 
 
-def turboview_command(emulator, base, rom, folder, roots):
+def turboview_command(emulator, base, rom, folder, roots, display="window"):
     """An A1200 that boots from the TurboView folder (TurboCAT:), with the collection folders
     mounted read-only under their volume names so TurboView can show Amiga paths."""
     roots = [(p, v) for p, v in roots if os.path.isdir(p) and "," not in p]
@@ -225,6 +247,8 @@ def turboview_command(emulator, base, rom, folder, roots):
         cmd = list(base) + ["--model", "A1200", "-G"]
         if rom:
             cmd += ["-r", rom]
+        cmd += display_args(emulator, display)
+        cmd += ["-s", "gfx_resolution=superhires"]     # TurboView's own 1280x512 screen, in full detail
         cmd += ["-s", "floppy1type=0"]                 # a second drive, DF1:
         # A browsing tool needn't run at original speed: fast RAM and the CPU flat out.
         cmd += ["-s", "fastmem_size=8", "-s", "cpu_speed=max", "-s", "cpu_cycle_exact=false"]
@@ -233,8 +257,8 @@ def turboview_command(emulator, base, rom, folder, roots):
             cmd += ["-s", f"filesystem2=ro,DH{i}:{vol}:{path},-128"]
         return cmd
     cmd = list(base) + ["--amiga_model=A1200", "--floppy_drive_count=2", "--fast_memory=8192",
-                        "--uae_cpu_speed=max",
-                        f"--hard_drive_0={folder}", "--hard_drive_0_label=TurboCAT"]
+                        "--uae_cpu_speed=max", "--uae_gfx_resolution=superhires",
+                        f"--hard_drive_0={folder}", "--hard_drive_0_label=TurboCAT"] + display_args(emulator, display)
     if rom:
         cmd.append(f"--kickstart_file={rom}")
     for i, (path, vol) in enumerate(roots, 1):

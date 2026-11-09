@@ -52,3 +52,15 @@ class SetupTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DisplayTest(unittest.TestCase):
+    def test_screen_choices_for_each_emulator(self):
+        self.assertEqual(emulator.display_args("amiberry", "window"), [])
+        full = emulator.display_args("amiberry", "fullscreen")
+        self.assertIn("gfx_fullscreen_amiga=fullwindow", full)
+        self.assertIn("gfx_keep_aspect=true", full)
+        self.assertIn("gfx_width_windowed=1920", emulator.display_args("amiberry", "1080p"))
+        self.assertIn("--fullscreen=1", emulator.display_args("fs-uae", "fullscreen"))
+        cmd = emulator.command("amiberry", ["amiberry"], "A500", None, ["/x/a.adf"], display="fullscreen")
+        self.assertIn("gfx_fullscreen_amiga=fullwindow", cmd)

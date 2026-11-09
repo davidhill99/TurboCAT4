@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import (QAbstractTableModel, QIODevice, QItemSelectionModel, QModelIndex,
                             QObject, QRectF, QSize, QSortFilterProxyModel, Qt, QThread, QTimer,
                             QUrl, Signal)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
+from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QAction, QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog,
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 from . import APP_NAME, VERSION
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
-from . import datlists, dups as dupes, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
+from . import datlists, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
 from .scanner import rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
@@ -79,6 +79,7 @@ STATUS = {"ok": ("OK", "ok", "ok-tint", None),
 # Filter chips above the list: key, label, icon, test for an item.
 FILTERS = [
     ("all", "All items", None, lambda it: True),
+    ("favs", "Favourites", "star", lambda it: it.favourite),
     ("games", "Games", "game", lambda it: bool(it.game)),
     ("music", "Music", "music", lambda it: it.music > 0),
     ("utils", "Utilities", "tool", lambda it: bool(it.utility)),
@@ -204,6 +205,7 @@ class Item:
     game: str = ""              # why it counts as a game ("" if it doesn't)
     utility: str = ""           # why it counts as a utility or application ("" if it doesn't)
     verified: tuple = ()        # ("match" or "differs", collection list title) if a list knows it
+    favourite: bool = False     # starred by the user
     tosec_name: str = ""        # the disk's proper name, found by its checksum ("" if unknown)
     identified_by: str = ""     # the list that knew it
     name_guess: str = ""        # a guess from the folder, for a file called "Disk1.adf"
@@ -230,6 +232,7 @@ def load_items(cat):
             if pub:
                 game_why[mid] = f"identified as a {pub} disk by its checksum ({pub} published games)"
     util_why = utilities.classify(cat, rows, game_why, lists, cat.scan_roots())
+    starred = favs.load(cat)
     rank = {"error": 3, "warning": 2}
     items = []
     for m in rows:
@@ -300,6 +303,7 @@ def load_items(cat):
             pic_origin=(th["origin"] or "") if th else "",
             game=game_why.get(m["id"], ""), utility=util_why.get(m["id"], ""),
             verified=_verified(m, kids, lists),
+            favourite=favs.item_key(pictures.item_key(m)) in starred,
             tosec_name=identify.stem(known[m["id"]][0]) if m["id"] in known else "",
             identified_by=known[m["id"]][1] if m["id"] in known else "",
             name_guess="" if m["id"] in known else identify.guess(m["source"]),
@@ -341,6 +345,7 @@ def make_set_items(items):
             thumb_icon=with_icon.thumb_icon, pic=with_pic.pic, pic_from=with_pic.pic_from,
             pic_origin=with_pic.pic_origin, game=next((m.game for m in members if m.game), ""),
             utility=next((m.utility for m in members if m.utility), ""),
+            favourite=any(m.favourite for m in members),
             key=first.key, music=sum(m.music for m in members),
             members=tuple(m.id for m in members), set_badge=badge, set_tone=tone,
             set_problem=not ds.complete, dset=ds)
@@ -430,6 +435,11 @@ def _type_line(it):
     return f"{it.type} · file {it.file}" if _renamed(it) else it.type
 
 
+def star_rect(r):
+    """Where a row's star sits, at the right of the number column."""
+    return QRectF(r.right() - 26, r.top() + (r.height() - 16) / 2, 16, 16)
+
+
 def _version_word(it):
     """The versions pill: "4 versions" on the version shown, "Other version" on the rest."""
     if it.versions < 2:
@@ -437,7 +447,7 @@ def _version_word(it):
     return "Other version" if it.version_of else f"{it.versions} versions"
 
 
-TUNE_COLUMNS = ["TUNE", "FORMAT", "SIZE", "LENGTH", "NO.", "WHERE"]
+TUNE_COLUMNS = ["TUNE", "ARTIST", "FORMAT", "LENGTH", "SIZE", "NO.", "WHERE"]
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
@@ -455,6 +465,7 @@ class TuneModel(QAbstractTableModel):
     def __init__(self):
         super().__init__()
         self.rows = []          # (music row, item)
+        self.starred = set()    # favourites.tune_key of each favourite tune
 
     def set_rows(self, rows):
         self.beginResetModel()
@@ -472,14 +483,42 @@ class TuneModel(QAbstractTableModel):
             if role == Qt.ItemDataRole.DisplayRole:
                 return TUNE_COLUMNS[section]
             if role == Qt.ItemDataRole.TextAlignmentRole:
-                return int((Qt.AlignmentFlag.AlignRight if section in (2, 3) else Qt.AlignmentFlag.AlignLeft)
+                return int((Qt.AlignmentFlag.AlignRight if section in (3, 4) else Qt.AlignmentFlag.AlignLeft)
                            | Qt.AlignmentFlag.AlignVCenter)
         return None
 
     @staticmethod
     def title(r):
-        name = r["file"].rsplit("/", 1)[-1]
-        return r["title"] or re.sub(r"^(mod|med|xm|s3m)\.", "", name, flags=re.I)
+        """The song name, or the file name when the tune has none."""
+        return (r["title"] or "").strip() or TuneModel.file_name(r)
+
+    GENERIC = re.compile(r"^(song|songs|tune|tunes|music|data|sng|mod|module|snd|sound|theme|intro|end|"
+                         r"backsong|game|title|main)[\s._\-]*\d*$", re.I)
+
+    @staticmethod
+    def file_name(r):
+        """The file name without mod./med. prefixes; with its folder in front when the name alone
+        says little (Columns › song.0 rather than song.0)."""
+        parts = r["file"].split("/")
+        name = re.sub(r"^(mod|med|xm|s3m)\.", "", parts[-1], flags=re.I)
+        stem = re.sub(r"\.(mod|med|sng|song|xm|s3m|it)$", "", name, flags=re.I)
+        if (TuneModel.GENERIC.match(stem) or len(stem) <= 3) and len(parts) > 1:
+            folder = next((p for p in reversed(parts[:-1]) if not TuneModel.GENERIC.match(p)), parts[-2])
+            return f"{folder} › {name}"
+        return name
+
+    @staticmethod
+    def named(r):
+        """True when the tune has a song name of its own (not just its file name)."""
+        t = (r["title"] or "").strip()
+        return bool(t) and not pictures._is_file_name(t, r["file"])
+
+    @staticmethod
+    def artist(r):
+        try:
+            return (r["artist"] or "").strip()
+        except (IndexError, KeyError):
+            return ""
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -487,29 +526,37 @@ class TuneModel(QAbstractTableModel):
         r, it = self.rows[index.row()]
         col = index.column()
         dur = r["duration"]
+        length = music.fmt_time(dur) if dur and dur > 0 else ("can't play" if dur is not None else "…")
         if role == Qt.ItemDataRole.DisplayRole:
-            return [self.title(r),
+            return [self.title(r), self.artist(r),
                     r["fmt"] + (" (in a program)" if r["length"] else ""),
-                    _short_size(r["size"] or 0),
-                    music.fmt_time(dur) if dur and dur > 0 else ("can't play" if dur is not None else "…"),
-                    f"#{it.number:04d}",
-                    r["shown"]][col]
+                    length, _short_size(r["size"] or 0), f"#{it.number:04d}", r["shown"]][col]
         if role == SORT_ROLE:
-            return [self.title(r).lower(), r["fmt"], r["size"] or 0, dur or 0, it.number,
-                    r["shown"].lower()][col]
+            return [self.title(r).lower(), self.artist(r).lower(), r["fmt"], dur or 0, r["size"] or 0,
+                    it.number, r["shown"].lower()][col]
         if role == Qt.ItemDataRole.ToolTipRole:
-            return f"{self.title(r)}\n{r['shown']}\nDouble-click to play"
+            name = "" if self.named(r) else "\n(no song name in the tune: this is its file name)"
+            by = f"\nby {self.artist(r)}" if self.artist(r) else ""
+            return f"{self.title(r)}{by}{name}\n{r['shown']}\nDouble-click to play"
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            return int((Qt.AlignmentFlag.AlignRight if col in (2, 3) else Qt.AlignmentFlag.AlignLeft)
+            return int((Qt.AlignmentFlag.AlignRight if col in (3, 4) else Qt.AlignmentFlag.AlignLeft)
                        | Qt.AlignmentFlag.AlignVCenter)
-        if role == Qt.ItemDataRole.ForegroundRole and col in (1, 4, 5):
-            return C["ink-muted"]
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if col == 0 and not self.named(r):
+                return C["ink-soft"]
+            if col in (2, 5, 6):
+                return C["ink-muted"]
         if role == Qt.ItemDataRole.FontRole:
-            return data_font(12) if col in (2, 3, 4) else (ui_font(13, QFont.Weight.Medium) if col == 0
-                                                         else ui_font(12))
+            if col == 0:
+                return ui_font(14, QFont.Weight.Medium, italic=not self.named(r))
+            return data_font(13) if col in (3, 4, 5) else ui_font(13)
         if role == Qt.ItemDataRole.DecorationRole and col == 0:
-            return QIcon(icon("music", 16))
+            return QIcon(icon("star" if favs.tune_key(r) in self.starred else "music", 16))
         return None
+
+    def refresh(self):
+        if self.rows:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self.rows) - 1, 0))
 
 
 class RowDelegate(QStyledItemDelegate):
@@ -535,6 +582,9 @@ class RowDelegate(QStyledItemDelegate):
             p.setFont(data_font(13))
             p.setPen(C["ink-muted"])
             p.drawText(QRectF(x, r.top(), w, r.height()), Qt.AlignmentFlag.AlignVCenter, f"#{it.number:04d}")
+            if it.favourite or selected:            # a click on the star stars / unstars the row
+                sr = star_rect(r)
+                p.drawPixmap(int(sr.x()), int(sr.y()), icon("star" if it.favourite else "star-off", 16))
         elif col == 1:
             self._paint_thumb(p, it, x, r)
             tx, tw = x + self.SLOT_W + 10, w - self.SLOT_W - 10
@@ -843,6 +893,8 @@ class DetailsPanel(QFrame):
         self.cat = cat
         self.on_select_number = on_select_number
         self.on_keep = None          # keep this copy of a duplicate (set by the window)
+        self.on_favourite = None     # star / unstar what is shown (set by the window)
+        self.item = None
         self.on_version = None       # show this version of a disk (set by the window)
         self.source = None
         self.item_id = None
@@ -961,6 +1013,12 @@ class DetailsPanel(QFrame):
 
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
+        self.fav_btn = QPushButton()
+        self.fav_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
+        self.fav_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fav_btn.setToolTip("Star it, so it shows under Favourites here and in TurboView (Ctrl+D)")
+        self.fav_btn.clicked.connect(lambda: self.on_favourite and self.on_favourite())
+        buttons.addWidget(self.fav_btn)
         self.show_btn = QPushButton("Show in folder")
         self.show_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -972,13 +1030,15 @@ class DetailsPanel(QFrame):
         self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play_btn.setToolTip("Start this disk (and the rest of its set) in Amiberry or FS-UAE "
                                  "(Ctrl+P, or double-click it in the list)")
-        self.play_btn.clicked.connect(lambda: on_start and self.item_id and on_start([self.item_id]))
+        self.play_btn.clicked.connect(lambda: on_start and self.item_id and on_start(
+            list(self.item.members) if self.item is not None and self.item.members else [self.item_id]))
         buttons.insertWidget(0, self.play_btn)
         self.copy_btn = QPushButton("Copy to Gotek stick")
         self.copy_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.copy_btn.setToolTip("Copy this disk to a USB stick for a Gotek drive")
-        self.copy_btn.clicked.connect(lambda: on_copy and self.item_id and on_copy([self.item_id]))
+        self.copy_btn.clicked.connect(lambda: on_copy and self.item_id and on_copy(
+            list(self.item.members) if self.item is not None and self.item.members else [self.item_id]))
         buttons.addWidget(self.copy_btn)
         buttons.addStretch(1)
         v.addLayout(buttons)
@@ -1140,6 +1200,9 @@ class DetailsPanel(QFrame):
         kind = m["kind"] or ""
         self.source = m["source"]
         self.item_id = m["id"]
+        self.item = item
+        self.fav_btn.setIcon(QIcon(icon("star" if item.favourite else "star-off", 16)))
+        self.fav_btn.setText("Favourite" if item.favourite else "Add to favourites")
         floppy = any(r["kind"] in gotek.FLOPPY_KINDS and r["status"] != "empty" for r in [m] + kids)
         self.copy_btn.setVisible(floppy and not m["whd_name"])
         ipf = item.game and bool(self.cat.db.execute(
@@ -1775,6 +1838,23 @@ class PlayerBar(QFrame):
 
 # ---------------------------------------------------------------- pictures
 
+class TurboViewWorker(QThread):
+    """Rewrite TurboView's catalogue files, off the window's thread (it takes a few seconds)."""
+
+    def __init__(self, db_path):
+        super().__init__()
+        self.db_path = db_path
+        self.stop_wanted = False
+
+    def run(self):
+        try:
+            cat = Catalogue(self.db_path)
+            folder = cat.get_meta("turboview_dir") or turboview.default_folder()
+            turboview.export(cat, load_items(cat), folder)
+        except Exception:
+            pass
+
+
 class PictureWorker(QThread):
     """Look for icons and pictures on items not yet looked at; optionally online too."""
     progress = Signal(str, int, int, str)      # phase, done, total, what it is looking at
@@ -1904,10 +1984,23 @@ class PlayDialog(QDialog):
             self.model_box.addItem(labels[mdl] + ("   — suggested" if mdl == guess else ""), mdl)
         self.model_box.setCurrentIndex(emulator.MODELS.index(guess))
         grid.addWidget(self.model_box, 1, 1)
-        for w in (self.emu_box, self.model_box):
+        grid.addWidget(QLabel("Screen"), 2, 0)
+        self.display_box = QComboBox()
+        size = QGuiApplication.primaryScreen().size() if QGuiApplication.primaryScreen() else None
+        for key, label in emulator.DISPLAYS.items():
+            if key == "fullscreen" and size is not None:
+                label += f" ({size.width()} × {size.height()})"
+            self.display_box.addItem(label, key)
+        self.display_box.setCurrentIndex(max(0, self.display_box.findData(
+            cat.get_meta("emulator_display", "fullscreen"))))
+        self.display_box.setToolTip("How big the emulator shows the Amiga (also used by TurboView). "
+                                    "The picture keeps the Amiga's shape. In Amiberry, F12 opens its "
+                                    "settings, where you can quit or leave full screen.")
+        grid.addWidget(self.display_box, 2, 1)
+        for w in (self.emu_box, self.model_box, self.display_box):
             w.setFont(ui_font(13))
             w.setMinimumHeight(36)
-        for r in range(2):
+        for r in range(3):
             grid.itemAtPosition(r, 0).widget().setFont(ui_font(13, QFont.Weight.DemiBold))
         grid.setColumnStretch(1, 1)
         v.addLayout(grid)
@@ -1941,9 +2034,11 @@ class PlayDialog(QDialog):
     def start(self):
         emu = self.emu_box.currentData()
         mdl = self.model_box.currentData()
+        display = self.display_box.currentData()
         self.cat.set_meta("emulator", emu)
+        self.cat.set_meta("emulator_display", display)
         cmd = emulator.command(emu, self.emulators[emu], mdl, self.roms.get(mdl), self.files,
-                               self.whdload)
+                               self.whdload, display=display)
         try:
             emulator.launch(cmd)
         except OSError as ex:
@@ -2718,7 +2813,15 @@ class MainWindow(QMainWindow):
         self.export_tunes_btn.setFont(ui_font(12, QFont.Weight.DemiBold))
         self.export_tunes_btn.setToolTip("Save this list of tunes as a spreadsheet (CSV)")
         self.export_tunes_btn.clicked.connect(self.export_tunes)
+        self.fav_tunes_btn = QPushButton("Favourites")
+        self.fav_tunes_btn.setObjectName("segment")
+        self.fav_tunes_btn.setCheckable(True)
+        self.fav_tunes_btn.setIcon(QIcon(icon("star", 16)))
+        self.fav_tunes_btn.setFont(ui_font(12, QFont.Weight.DemiBold))
+        self.fav_tunes_btn.setToolTip("Only your favourite tunes (star a tune with Ctrl+D, or click its note)")
+        self.fav_tunes_btn.toggled.connect(lambda _: self.run_search())
         res_row.addSpacing(8)
+        res_row.addWidget(self.fav_tunes_btn)
         res_row.addWidget(self.export_tunes_btn)
         sl.addLayout(res_row)
         self.tune_view = False
@@ -2780,7 +2883,7 @@ class MainWindow(QMainWindow):
         self.tunes_table.setWordWrap(False)
         self.tunes_table.setIconSize(QSize(16, 16))
         self.tunes_table.verticalHeader().hide()
-        self.tunes_table.verticalHeader().setDefaultSectionSize(34)
+        self.tunes_table.verticalHeader().setDefaultSectionSize(40)
         self.tunes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tunes_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.tunes_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -2789,7 +2892,7 @@ class MainWindow(QMainWindow):
         th2.setHighlightSections(False)
         th2.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         th2.setStretchLastSection(True)
-        for col, width in enumerate((260, 170, 80, 80, 70)):
+        for col, width in enumerate((300, 160, 170, 80, 80, 70)):
             self.tunes_table.setColumnWidth(col, width)
         self.tunes_table.doubleClicked.connect(self._play_tune)
         self.tunes_table.activated.connect(self._play_tune)
@@ -2807,6 +2910,12 @@ class MainWindow(QMainWindow):
         self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek, self.find_online,
                                     self.play_music, self.play_in_emulator)
         self.details.on_keep = self.keep_copy
+        self.details.on_favourite = self.toggle_favourite
+        self.table.clicked.connect(self._row_clicked)
+        self.tunes_table.clicked.connect(self._tune_clicked)
+        self.tv_timer = QTimer(self, singleShot=True, interval=4000)
+        self.tv_timer.timeout.connect(self._update_turboview)
+        self.tv_worker = None
         self.details.on_version = self.show_version
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("split")
@@ -2926,6 +3035,9 @@ class MainWindow(QMainWindow):
         self.act_play = add(m, "&Play", self.play_selected, "Ctrl+P",
                             "Start the disk in an emulator, or play a tune in TurboCAT")
         self.act_gotek = add(m, "Copy to &Gotek stick…", lambda: self.copy_to_gotek(), "Ctrl+G")
+        self.act_fav = add(m, "Add to &favourites", self.toggle_favourite, "Ctrl+D",
+                           "Star the selected disks, games, utilities or tune; they show under Favourites "
+                           "here and in TurboView")
         self.act_folder = add(m, "Show in &folder", self.show_selected_in_folder, "Ctrl+Shift+O",
                               "Open the folder holding the selected item")
 
@@ -2973,6 +3085,8 @@ class MainWindow(QMainWindow):
             self.act_gotek.setText(f"Copy {n:,} to &Gotek stick…" if n > 1 else "Copy to &Gotek stick…")
             for a in (self.act_play, self.act_gotek, self.act_folder):
                 a.setEnabled(bool(ids))
+            self.act_fav.setText("Remove from &favourites" if chosen and all(c.favourite for c in chosen)
+                                 else "Add to &favourites")
 
     def _make_sets(self):
         self.set_rows, self.member_of, self.disk_no = make_set_items(self.all_items)
@@ -3043,6 +3157,77 @@ class MainWindow(QMainWindow):
         self.select_number(it.number)
         self.result_label.setText(f"Showing #{it.number:04d} {it.file}; the other versions are hidden "
                                   "while grouping is on (nothing is deleted)")
+
+    # -------------------------------------------------------------- favourites
+    def toggle_favourite(self):
+        """Star or unstar: the tune picked in the Tunes list, else the selected rows (a disk set's
+        row stars all its disks)."""
+        if self.filter == "music" and self.tune_view and self.stack.currentWidget() is self.tunes_table:
+            idx = self.tunes_table.currentIndex()
+            if idx.isValid():
+                r, _ = self.tune_model.rows[self.tune_proxy.mapToSource(idx).row()]
+                self._star_tunes([r])
+            return
+        ids = set(self.selected_ids())
+        rows = [it for it in self.model.items if it.id in ids]
+        if rows:
+            self._star_items(rows, not all(it.favourite for it in rows))
+
+    def _star_items(self, rows, on):
+        by_id = {it.id: it for it in self.all_items}
+        targets = []
+        for row in rows:
+            targets += [by_id[i] for i in row.members if i in by_id] if row.members else [by_id.get(row.id, row)]
+        favs.set_favourite(self.cat, {favs.item_key(it.key) for it in targets}, on)
+        for it in targets:
+            it.favourite = on
+        for row in self.set_rows:
+            row.favourite = any(by_id[i].favourite for i in row.members if i in by_id)
+        self.run_search()
+        n = len(rows)
+        self.result_label.setText(("Added to" if on else "Removed from") + f" favourites: "
+                                  + (rows[0].file if n == 1 else _n(n, "item")))
+        self.tv_timer.start()
+
+    def _star_tunes(self, tunes):
+        keys = {favs.tune_key(r) for r in tunes}
+        on = not keys <= self.tune_model.starred
+        favs.set_favourite(self.cat, keys, on)
+        self.tune_model.starred = {k for k in favs.load(self.cat) if k[0] == "tune"}
+        if self.fav_tunes_btn.isChecked():
+            self._fill_tunes(self.search.edit.text().strip())
+        else:
+            self.tune_model.refresh()
+        self.result_label.setText(("Added to" if on else "Removed from") + " favourite tunes: "
+                                  + TuneModel.title(tunes[0]))
+        self.tv_timer.start()
+
+    def _row_clicked(self, index):
+        """A click on a row's star stars or unstars it."""
+        if index.column() != 0:
+            return
+        pos = self.table.viewport().mapFromGlobal(QCursor.pos())
+        if star_rect(self.table.visualRect(index)).adjusted(-4, -4, 4, 4).contains(pos):
+            it = self.model.items[index.row()]
+            self._star_items([it], not it.favourite)
+
+    def _tune_clicked(self, index):
+        """A click on a tune's note (or star) stars or unstars it."""
+        if index.column() != 0:
+            return
+        pos = self.tunes_table.viewport().mapFromGlobal(QCursor.pos())
+        if pos.x() - self.tunes_table.visualRect(index).left() <= 26:
+            r, _ = self.tune_model.rows[self.tune_proxy.mapToSource(index).row()]
+            self._star_tunes([r])
+
+    def _update_turboview(self):
+        """Write TurboView's copy of the catalogue (with the favourites), in the background."""
+        if self.tv_worker is not None or self.pic_worker is not None or self.worker is not None:
+            self.tv_timer.start()          # busy: try again shortly
+            return
+        self.tv_worker = TurboViewWorker(self.db_path)
+        self.tv_worker.finished.connect(lambda: setattr(self, "tv_worker", None))
+        self.tv_worker.start()
 
     def keep_copy(self, m):
         """Keep this copy of a duplicate disk: it is shown, the others become spares."""
@@ -3140,7 +3325,8 @@ class MainWindow(QMainWindow):
             return
         rom = emulator.find_kickstarts().get("A1200")
         cmd = emulator.turboview_command(emu, self.emulators[emu], rom, folder,
-                                         turboview.roots_with_volumes(self.cat))
+                                         turboview.roots_with_volumes(self.cat),
+                                         display=self.cat.get_meta("emulator_display", "fullscreen"))
         emulator.launch(cmd)
 
     def play_music(self, rows, index):
@@ -3561,7 +3747,8 @@ class MainWindow(QMainWindow):
 
     def _busy(self):
         """What is still running in the background, in words (empty if nothing)."""
-        return " and ".join(w for w, t in (("the scan", self.worker), ("the picture search", self.pic_worker))
+        return " and ".join(w for w, t in (("the scan", self.worker), ("the picture search", self.pic_worker),
+                                           ("updating TurboView", getattr(self, "tv_worker", None)))
                             if t is not None)
 
     def closeEvent(self, event):
@@ -3569,12 +3756,15 @@ class MainWindow(QMainWindow):
         and close for real once it has (each item is saved as it is done, so nothing is lost)."""
         self.closing = True
         self.player_bar.player.stop()
+        if self.tv_timer.isActive() and self.worker is None and self.pic_worker is None:
+            self.tv_timer.stop()             # favourites just changed: give TurboView them first
+            self._update_turboview()
         busy = self._busy()
         if not busy:
             super().closeEvent(event)
             return
         event.ignore()
-        for t in (self.worker, self.pic_worker):
+        for t in (self.worker, self.pic_worker, self.tv_worker):
             if t is not None:
                 t.stop_wanted = True
                 t.finished.connect(self._close_when_idle)
@@ -3726,6 +3916,7 @@ class MainWindow(QMainWindow):
             b.setVisible(music_view)
         self.group_btn.setVisible(not (music_view and self.tune_view) and self.filter != "dups")
         self.export_tunes_btn.setVisible(music_view and self.tune_view)
+        self.fav_tunes_btn.setVisible(music_view and self.tune_view)
         if not self.all_items:
             self.message.setText(
                 "The catalogue is empty.\n\nClick Scan folder… and choose the folder where you "
@@ -3753,6 +3944,7 @@ class MainWindow(QMainWindow):
 
     def _fill_tunes(self, text):
         """Every tune found, or those whose name, format, file or disk matches the search."""
+        self.tune_model.starred = {k for k in favs.load(self.cat) if k[0] == "tune"}
         by_key = {}
         for it in self.all_items:
             by_key.setdefault(it.key, it)
@@ -3763,12 +3955,17 @@ class MainWindow(QMainWindow):
             if it is None:
                 continue
             for r in tunes:
-                if words and not matches(words, r["title"], r["file"], r["shown"], r["fmt"],
-                                         it.file, it.title):
+                if words and not matches(words, r["title"], TuneModel.artist(r), r["file"], r["shown"],
+                                         r["fmt"], it.file, it.title):
+                    continue
+                if self.fav_tunes_btn.isChecked() and favs.tune_key(r) not in self.tune_model.starred:
                     continue
                 rows.append((r, it))
         keep = self._current_tune()
+        self.tune_model.starred = {k for k in favs.load(self.cat) if k[0] == "tune"}
         self.tune_model.set_rows(rows)
+        # Most Amiga modules don't record an artist: show the column only when some do.
+        self.tunes_table.setColumnHidden(1, not any(TuneModel.artist(r) for r, _ in rows))
         total = sum(r["duration"] for r, _ in rows if r["duration"] and r["duration"] > 0)
         hours = f"{total / 3600:.1f} hours" if total >= 3600 else f"{total / 60:.0f} minutes"
         items = len({it.id for _, it in rows})
@@ -3823,11 +4020,11 @@ class MainWindow(QMainWindow):
         import csv
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["Tune", "Format", "Size (bytes)", "Length", "Item", "Item file", "Where"])
+            w.writerow(["Tune", "Artist", "Format", "Size (bytes)", "Length", "Item", "Item file", "Where"])
             for i in range(self.tune_proxy.rowCount()):
                 r, it = self.tune_model.rows[self.tune_proxy.mapToSource(self.tune_proxy.index(i, 0)).row()]
                 dur = r["duration"]
-                w.writerow([TuneModel.title(r), r["fmt"], r["size"],
+                w.writerow([TuneModel.title(r), TuneModel.artist(r), r["fmt"], r["size"],
                             music.fmt_time(dur) if dur and dur > 0 else "",
                             f"#{it.number:04d}", it.path, r["shown"]])
         self.result_label.setText(f"Saved {self.tune_proxy.rowCount():,} tunes to {path}")

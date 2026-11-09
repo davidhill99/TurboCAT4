@@ -21,6 +21,8 @@
 #include <intuition/gadgetclass.h>
 #include <libraries/gadtools.h>
 #include <graphics/text.h>
+#include <graphics/displayinfo.h>
+#include <graphics/modeid.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -143,6 +145,8 @@ static const char *flag_words(const char *f)
     if (strchr(f, 'N')) strcat(buf, "non-DOS ");
     if (strchr(f, 'H')) strcat(buf, "hard-drive ");
     if (strchr(f, 'B')) strcat(buf, "bootable ");
+    if (strchr(f, 'U')) strcat(buf, "utility ");
+    if (strchr(f, 'F')) strcat(buf, "FAVOURITE ");
     return buf;
 }
 
@@ -219,7 +223,9 @@ static long search_items(const char *text, char flag, emit_fn emit, long max)
         if (!contains(fl[4], text) && !contains(fl[5], text) && !contains(fl[6], text)) continue;
         if (total < max) {
             stem(fl[5], name, 70);
-            sprintf(buf, "#%04ld %c %s", atol(fl[1]), strchr(fl[2], 'G') ? '*' : ' ', name);
+            /* \xbb marks a favourite, * a game */
+            sprintf(buf, "#%04ld %c %s", atol(fl[1]),
+                    strchr(fl[2], 'F') ? '\xbb' : strchr(fl[2], 'G') ? '*' : ' ', name);
             emit(atol(fl[1]), buf);
         }
         total++;
@@ -248,19 +254,25 @@ static long search_files(const char *text, emit_fn emit, long max)
     return total;
 }
 
-static long search_tunes(const char *text, emit_fn emit, long max)
+/* Tune lines: 0 T, 1 number, 2 title, 3 format, 4 seconds, 5 where, 6 F (favourite) or - */
+static long search_tunes(const char *text, emit_fn emit, long max, int favourites_only)
 {
     FILE *f = open_cat("TurboCAT.mus");
-    char *tf[7], buf[ROWLEN];
+    char *tf[8], buf[ROWLEN];
     long total = 0;
     if (!f) return -1;
     set_needle(text);
     while (fgets(line, LINE, f)) {
+        int nf, fav;
         chomp(line);
-        if (fields(line, tf, 7) < 6 || (!contains(tf[2], text) && !contains(tf[5], text))) continue;
+        nf = fields(line, tf, 8);
+        if (nf < 6 || (!contains(tf[2], text) && !contains(tf[5], text))) continue;
+        fav = nf > 6 && tf[6][0] == 'F';           /* older catalogues have no favourites field */
+        if (favourites_only && !fav) continue;
         if (total < max) {
             long s = atol(tf[4]);
-            sprintf(buf, "#%04ld %-30.30s %ld:%02ld %.20s", atol(tf[1]), tf[2], s / 60, s % 60, tf[3]);
+            sprintf(buf, "#%04ld %c%-30.30s %ld:%02ld %.20s", atol(tf[1]),
+                    fav ? '\xbb' : ' ', tf[2], s / 60, s % 60, tf[3]);
             emit(atol(tf[1]), buf);
         }
         total++;
@@ -317,16 +329,19 @@ static int details(long number, emit_fn emit, int maxfiles)
     }
     /* Tunes first: there are usually fewer of them than files */
     if (strchr(fl[2], 'M') && (f = open_cat("TurboCAT.mus"))) {
-        char *tf[7];
+        char *tf[8];
         int tunes = 0;
         emit(number, "");
         emit(number, "Music:");
         while (fgets(line, LINE, f)) {
+            int nf;
             chomp(line);
-            if (fields(line, tf, 7) < 6 || atol(tf[1]) != number) continue;
+            nf = fields(line, tf, 8);
+            if (nf < 6 || atol(tf[1]) != number) continue;
             if (tunes < 40) {
                 long s = atol(tf[4]);
-                sprintf(buf, "  %-30.30s %ld:%02ld %.20s", tf[2], s / 60, s % 60, tf[3]);
+                sprintf(buf, " %c%-30.30s %ld:%02ld %.20s", nf > 6 && tf[6][0] == 'F' ? '\xbb' : ' ',
+                        tf[2], s / 60, s % 60, tf[3]);
                 emit(number, buf);
             }
             tunes++;
@@ -420,6 +435,9 @@ static void shell(void)
                    "  9            details of #0009\n"
                    "  f name       find a file on any disk\n"
                    "  tunes name   find a music module by its title\n"
+                   "  favs name    your favourites (starred in TurboCAT), disks and tunes\n"
+                   "  favtunes     only your favourite tunes\n"
+                   "  utils name   only utilities and applications\n"
                    "  games name   only games       music name   only disks with music\n"
                    "  problems     disks with problems\n"
                    "  insert 9     put #0009 in DF0: (\"insert 9 1\" for DF1:)\n"
@@ -431,7 +449,13 @@ static void shell(void)
         if (*s == '#') s++;
         if (*s >= '0' && *s <= '9') { printf("\n"); details(atol(s), print_row, 30); printf("\n"); continue; }
         if (!strncmp(s, "f ", 2)) n = search_files(s + 2, print_row, 20);
-        else if (!strncmp(s, "tunes", 5)) n = search_tunes(s[5] ? s + 6 : "", print_row, 20);
+        else if (!strncmp(s, "favtunes", 8)) n = search_tunes(s[8] ? s + 9 : "", print_row, 20, 1);
+        else if (!strncmp(s, "tunes", 5)) n = search_tunes(s[5] ? s + 6 : "", print_row, 20, 0);
+        else if (!strncmp(s, "favs", 4)) {
+            n = search_items(s[4] ? s + 5 : "", 'F', print_row, 20);
+            n += search_tunes(s[4] ? s + 5 : "", print_row, 20, 1);
+        }
+        else if (!strncmp(s, "utils", 5)) n = search_items(s[5] ? s + 6 : "", 'U', print_row, 20);
         else if (!strcmp(s, "drives")) { drives(print_row); continue; }
         else if (!strncmp(s, "games", 5)) n = search_items(s[5] ? s + 6 : "", 'G', print_row, 20);
         else if (!strncmp(s, "music", 5)) n = search_items(s[5] ? s + 6 : "", 'M', print_row, 20);
@@ -467,6 +491,8 @@ static struct List row_list, line_list;
 static int nrows, nlines;
 
 static struct Screen *scr;
+static struct Screen *own_scr;        /* TurboView's own screen (SCREEN option), or NULL */
+static ULONG want_mode;               /* the screen mode asked for, 0 = use the Workbench screen */
 static struct Window *win;
 static APTR vi;
 static struct Gadget *glist, *g_search, *g_show, *g_in, *g_results, *g_details, *g_boot, *g_df0,
@@ -476,9 +502,11 @@ static int show_mode, in_mode, selected = -1, loadable, bootable, settle;
 static long current = -1;
 static int in_emulator;
 
-static STRPTR show_labels[] = { "All", "Games", "Music", "Problems", "Duplicates", NULL };
+static STRPTR show_labels[] = { "All", "Favourites", "Games", "Utilities", "Music", "Problems",
+                                "Duplicates", NULL };
 static STRPTR in_labels[] = { "Titles", "Files", "Tunes", NULL };
-static const char show_flags[] = { 0, 'G', 'M', 'P', 'D' };
+static const char show_flags[] = { 0, 'F', 'G', 'U', 'M', 'P', 'D' };
+#define FAV_SHOW 1             /* Show: Favourites also works with In: Tunes (favourite tunes) */
 
 static void new_list(struct List *l)
 {
@@ -568,12 +596,20 @@ static void run_search(void)
     selected = -1;
     if (in_mode == 1 && strlen(search_text) < 2) total = -2;
     else if (in_mode == 1) total = search_files(search_text, add_row, MAXROWS);
-    else if (in_mode == 2) total = search_tunes(search_text, add_row, MAXROWS);
+    else if (in_mode == 2) total = search_tunes(search_text, add_row, MAXROWS, show_mode == FAV_SHOW);
+    else if (show_mode == FAV_SHOW) {
+        /* Favourites: everything starred in TurboCAT, disks and games first, then tunes */
+        long items = search_items(search_text, 'F', add_row, MAXROWS);
+        long tunes = search_tunes(search_text, add_row, items < MAXROWS ? MAXROWS - items : 0, 1);
+        total = items < 0 ? tunes : tunes < 0 ? items : items + tunes;
+    }
     else total = search_items(search_text, show_flags[show_mode], add_row, MAXROWS);
     set_attrs(g_results, GTLV_Labels, (ULONG)&row_list);
     set_attrs(g_results, GTLV_Top, 0);
     if (total == -2) strcpy(buf, "Type at least 2 letters of a file name.");
     else if (total < 0) strcpy(buf, "The catalogue can't be read.");
+    else if (total == 0 && show_mode == FAV_SHOW && !search_text[0])
+        strcpy(buf, "No favourites yet: star disks or tunes in TurboCAT (Ctrl+D).");
     else if (total == 0) strcpy(buf, "Nothing found.");
     else if (total > MAXROWS) sprintf(buf, "%ld found; showing %d. Type more to narrow it down.", total, MAXROWS);
     else sprintf(buf, "%ld found.", total);
@@ -711,6 +747,13 @@ static void show_drives(void)
     set_attrs(g_details, GTLV_Labels, (ULONG)&line_list);
 }
 
+static void release_screen(void)
+{
+    if (own_scr) { CloseScreen(own_scr); own_scr = NULL; }
+    else if (scr) UnlockPubScreen(NULL, scr);
+    scr = NULL;
+}
+
 static int gui(void)
 {
     struct TagItem t[14];
@@ -721,19 +764,42 @@ static int gui(void)
     rows = malloc(sizeof(struct Row) * MAXROWS);
     lines = malloc(sizeof(struct Row) * MAXLINES);
     if (!rows || !lines) return 0;
-    if (!(scr = LockPubScreen(NULL))) return 0;
-    if (!(vi = GetVisualInfoA(scr, NULL))) { UnlockPubScreen(NULL, scr); return 0; }
+    if (want_mode) {
+        /* Its own screen at a higher resolution, so the window isn't blown up to fill a big
+           monitor: 640x512 or 1280x512 (both built into Kickstart 3 on ECS/AGA Amigas). */
+        static UWORD pens[] = { (UWORD)~0 };
+        struct TagItem st[9];
+        ULONG id = want_mode;
+        if (ModeNotAvailable(id)) id = PAL_MONITOR_ID | HIRESLACE_KEY;
+        if (ModeNotAvailable(id)) id = HIRESLACE_KEY;
+        st[0].ti_Tag = SA_DisplayID;  st[0].ti_Data = id;
+        st[1].ti_Tag = SA_Depth;      st[1].ti_Data = 2;
+        st[2].ti_Tag = SA_Title;      st[2].ti_Data = (ULONG)"TurboView 4";
+        st[3].ti_Tag = SA_Pens;       st[3].ti_Data = (ULONG)pens;
+        st[4].ti_Tag = SA_FullPalette; st[4].ti_Data = TRUE;
+        st[5].ti_Tag = SA_ShowTitle;  st[5].ti_Data = TRUE;
+        st[6].ti_Tag = SA_Interleaved; st[6].ti_Data = TRUE;
+        st[7].ti_Tag = TAG_DONE;
+        own_scr = OpenScreenTagList(NULL, st);
+    }
+    scr = own_scr ? own_scr : LockPubScreen(NULL);
+    if (!scr) return 0;
+    if (!(vi = GetVisualInfoA(scr, NULL))) { release_screen(); return 0; }
     new_list(&row_list);
     new_list(&line_list);
     ww = scr->Width > 720 ? 720 : scr->Width;
     wh = scr->Height - scr->BarHeight - 1;
     if (wh > 460) wh = 460;
+    if (own_scr) {                       /* a comfortable window in the middle of the big screen */
+        ww = scr->Width >= 1280 ? 760 : 600;
+        wh = scr->Height >= 480 ? 400 : wh;
+    }
     t[0].ti_Tag = WA_Title;       t[0].ti_Data = (ULONG)"TurboView 4 - TurboCAT catalogue";
     t[1].ti_Tag = WA_Left;        t[1].ti_Data = (scr->Width - ww) / 2;
-    t[2].ti_Tag = WA_Top;         t[2].ti_Data = scr->BarHeight + 1;
+    t[2].ti_Tag = WA_Top;         t[2].ti_Data = own_scr ? (scr->Height - wh) / 2 : scr->BarHeight + 1;
     t[3].ti_Tag = WA_Width;       t[3].ti_Data = ww;
     t[4].ti_Tag = WA_Height;      t[4].ti_Data = wh;
-    t[5].ti_Tag = WA_PubScreen;   t[5].ti_Data = (ULONG)scr;
+    t[5].ti_Tag = own_scr ? WA_CustomScreen : WA_PubScreen;   t[5].ti_Data = (ULONG)scr;
     t[6].ti_Tag = WA_Flags;       t[6].ti_Data = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                                                  WFLG_SIZEGADGET | WFLG_ACTIVATE | WFLG_SMART_REFRESH;
     t[7].ti_Tag = WA_IDCMP;       t[7].ti_Data = IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_NEWSIZE |
@@ -745,7 +811,7 @@ static int gui(void)
     t[11].ti_Tag = WA_MaxHeight;  t[11].ti_Data = ~0UL;
     t[12].ti_Tag = TAG_DONE;
     win = OpenWindowTagList(NULL, t);
-    if (!win) { FreeVisualInfo(vi); UnlockPubScreen(NULL, scr); return 0; }
+    if (!win) { FreeVisualInfo(vi); release_screen(); return 0; }
 
     in_emulator = find_uae();
     sprintf(status_text, "Catalogue of %s, %ld items.", made, nitems);
@@ -798,12 +864,16 @@ static int gui(void)
                     break;
                 case GID_SHOW:
                     show_mode = code;
-                    if (show_mode && in_mode) { in_mode = 0; set_attrs(g_in, GTCY_Active, 0); }
+                    if (show_mode && in_mode && !(show_mode == FAV_SHOW && in_mode == 2)) {
+                        in_mode = 0; set_attrs(g_in, GTCY_Active, 0);
+                    }
                     run_search();
                     break;
                 case GID_IN:
                     in_mode = code;
-                    if (in_mode && show_mode) { show_mode = 0; set_attrs(g_show, GTCY_Active, 0); }
+                    if (in_mode && show_mode && !(show_mode == FAV_SHOW && in_mode == 2)) {
+                        show_mode = 0; set_attrs(g_show, GTCY_Active, 0);
+                    }
                     run_search();
                     break;
                 case GID_RESULTS:
@@ -830,7 +900,7 @@ static int gui(void)
     CloseWindow(win);
     FreeGadgets(glist);
     FreeVisualInfo(vi);
-    UnlockPubScreen(NULL, scr);
+    release_screen();
     return 1;
 }
 
@@ -841,6 +911,11 @@ int main(int argc, char **argv)
     int want_shell = 0, i, ok = 0;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "SHELL") || !strcmp(argv[i], "shell")) want_shell = 1;
+        else if (!strcmp(argv[i], "FAVOURITES") || !strcmp(argv[i], "favourites")) show_mode = FAV_SHOW;
+        /* SCREEN=HIGH (640x512) or SCREEN=SUPER (1280x512): open on its own, sharper screen */
+        else if (!strncmp(argv[i], "SCREEN=", 7) || !strncmp(argv[i], "screen=", 7))
+            want_mode = (argv[i][7] == 'S' || argv[i][7] == 's') ? (PAL_MONITOR_ID | SUPERLACE_KEY)
+                                                                  : (PAL_MONITOR_ID | HIRESLACE_KEY);
         else {
             strncpy(catdir, argv[i], sizeof(catdir) - 2);
             if (catdir[strlen(catdir) - 1] != ':' && catdir[strlen(catdir) - 1] != '/') strcat(catdir, "/");

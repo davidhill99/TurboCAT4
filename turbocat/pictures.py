@@ -68,6 +68,12 @@ def ensure_schema(cat):
         cat.db.execute("ALTER TABLE music ADD COLUMN length INTEGER")
     if "duration" not in cols:
         cat.db.execute("ALTER TABLE music ADD COLUMN duration REAL")
+    if "artist" not in cols:
+        cat.db.execute("ALTER TABLE music ADD COLUMN artist TEXT")
+        cat.db.execute("ALTER TABLE music ADD COLUMN info_v INTEGER DEFAULT 0")
+
+
+MUSIC_INFO_V = 1       # bump to read every tune's song name and artist again
 
 
 def item_key(m):
@@ -293,13 +299,26 @@ def module_data(cat, row):
     return data
 
 
+def _clean_text(s):
+    s = re.sub(r"\s+", " ", (s or "").replace("\0", " ")).strip()
+    return "" if s.lower() in ("<unnamed>", "untitled", "unnamed") else s
+
+
+def _is_file_name(title, path):
+    """True when a tune's 'title' is just its file name (mod.tune, tune.mod)."""
+    name = path.rsplit("/", 1)[-1].lower()
+    stem = re.sub(r"^(mod|med|xm|s3m)\.", "", name).rsplit(".", 1)[0]
+    return title.strip().lower() in (name, stem)
+
+
 def measure_music(cat, progress=None, stop=lambda: False):
-    """Work out the playing time of every module not measured yet (needs libopenmpt).
-    Each disk or archive is opened once for all the tunes on it."""
+    """Work out the playing time, song name and artist of every module not looked at yet
+    (needs libopenmpt or libxmp). Each disk or archive is opened once for all its tunes."""
     ensure_schema(cat)
-    if music._Lib.get() is None:
+    if music._Lib.get() is None and music._Xmp.get() is None:
         return {"measured": 0}
-    rows = cat.db.execute("SELECT rowid, * FROM music WHERE duration IS NULL ORDER BY media_id").fetchall()
+    rows = cat.db.execute("SELECT rowid, * FROM music WHERE duration IS NULL OR COALESCE(info_v, 0) < ? "
+                          "ORDER BY media_id", (MUSIC_INFO_V,)).fetchall()
     by_media = {}
     for r in rows:
         by_media.setdefault(r["media_id"], []).append(r)
@@ -320,19 +339,24 @@ def measure_music(cat, progress=None, stop=lambda: False):
         except Exception:
             pass
         for r in tunes:
-            secs = -1.0
+            secs, title, artist = -1.0, r["title"] or "", r["artist"] or ""
             fe = files.get(r["file"])
             if fe is not None and r["fmt"] in music.PLAYABLE:
                 try:
                     data = fe.read()
                     if r["length"]:
                         data = data[r["offset"]:r["offset"] + r["length"]]
-                    mod = music.Module(data)
+                    mod = music.open_module(data)
                     secs = mod.duration
+                    found = _clean_text(mod.meta("title"))
+                    if found and (not title or _is_file_name(title, r["file"])):
+                        title = found
+                    artist = _clean_text(mod.meta("artist")) or artist
                     mod.close()
                 except Exception:
                     secs = -1.0
-            cat.db.execute("UPDATE music SET duration=? WHERE rowid=?", (secs, r["rowid"]))
+            cat.db.execute("UPDATE music SET duration=?, title=?, artist=?, info_v=? WHERE rowid=?",
+                           (secs, title, artist, MUSIC_INFO_V, r["rowid"]))
             done += 1
             if progress:
                 progress(done, len(rows), None)

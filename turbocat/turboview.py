@@ -11,23 +11,27 @@ TurboCAT.cat     header lines, then one line per item
     ROOT <tab> <PC folder> <tab> <Amiga volume it is mounted as>
     I <tab> number <tab> flags <tab> type <tab> title <tab> file <tab> PC path <tab> disk path
         flags: G game, M music, P problem, W warning, D duplicate, E empty, N non-DOS, H hard drive,
-               B bootable (the disk starts by itself when the Amiga is switched on)
+               B bootable (the disk starts by itself when the Amiga is switched on),
+               F favourite (starred in TurboCAT), U utility or application
         disk path: what the emulator can put in a drive (ADF, ADZ, DMS or a ZIP of one disk), or -
 TurboCAT.fil     F <tab> number <tab> path inside <tab> size     (every file, in item order)
 TurboCAT.idx     number <tab> byte offset of its first line in TurboCAT.fil
-TurboCAT.mus     T <tab> number <tab> title <tab> format <tab> seconds <tab> where
+TurboCAT.mus     T <tab> number <tab> title <tab> format <tab> seconds <tab> where <tab> F or -
 """
 import os
 import platform
 import re
 import time
 
-from . import pictures
+from . import favourites, pictures
 
-FLAG_ORDER = "GMPWDENHB"
+FLAG_ORDER = "GMPWDENHBFU"
 PROGRAM = os.path.join(os.path.dirname(__file__), "amiga", "TurboView")   # built from amiga/turboview.c
+# SCREEN=SUPER: TurboView opens its own 1280x512 screen (super-hires, interlaced), so on a big
+# monitor it is a window in the middle of the screen rather than the whole Workbench blown up to
+# fill it. The emulator is told to show super-hires detail (see emulator.turboview_command).
 STARTUP = "; Written by TurboCAT: starts TurboView when the emulator boots from this folder\n" \
-          "TurboCAT:TurboView TurboCAT:\n"
+          "TurboCAT:TurboView TurboCAT: SCREEN=SUPER\n"
 
 
 def default_folder():
@@ -99,7 +103,8 @@ def export(cat, items, folder):
     def flags(it):
         f = {"G": bool(it.game), "M": it.music > 0, "P": it.status == "error",
              "W": it.status == "warning", "D": it.dup, "E": it.status == "empty",
-             "N": it.non_dos, "H": it.hard_drive, "B": bootable(it)}
+             "N": it.non_dos, "H": it.hard_drive, "B": bootable(it),
+             "F": getattr(it, "favourite", False), "U": bool(getattr(it, "utility", ""))}
         return "".join(k for k in FLAG_ORDER if f[k]) or "-"
 
     tmp = {name: os.path.join(folder, name + ".part") for name in
@@ -128,6 +133,7 @@ def export(cat, items, folder):
             for f in rows[n]:
                 line = f"F\t{n}\t{_txt(f['path'])}{'/' if f['is_dir'] else ''}\t{f['size'] or 0}\n"
                 fil.write(line.encode("latin-1", "replace"))
+    starred = favourites.load(cat)
     by_key = {}
     for it in items:
         by_key.setdefault(it.key, it)
@@ -139,8 +145,9 @@ def export(cat, items, folder):
             for r in rs:
                 dur = r["duration"] if r["duration"] and r["duration"] > 0 else 0
                 title = r["title"] or r["file"].rsplit("/", 1)[-1]
+                fav = "F" if favourites.tune_key(r) in starred else "-"
                 mus.write("\t".join(["T", str(it.number), _txt(title), _txt(r["fmt"]),
-                                     str(int(round(dur))), _txt(r["shown"])]) + "\n")
+                                     str(int(round(dur))), _txt(r["shown"]), fav]) + "\n")
     for name, path in tmp.items():
         os.replace(path, os.path.join(folder, name))
     return {"items": len(items), "files": sum(len(v) for v in rows.values()), "folder": folder}
