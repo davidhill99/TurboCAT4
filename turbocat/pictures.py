@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS music (
     shown     TEXT,               -- where it is, for people ("Disk.adf: mods/mod.tune")
     fmt       TEXT, title TEXT, size INTEGER,
     offset    INTEGER DEFAULT 0,  -- for a module built into a program: where it starts
-    length    INTEGER             -- ... and how long it is (NULL: the whole file)
+    length    INTEGER,            -- ... and how long it is (NULL: the whole file)
+    duration  REAL                -- playing time in seconds (NULL: not measured, -1: can't play)
 );
 CREATE INDEX IF NOT EXISTS ix_music_key ON music(key);
 """
@@ -65,6 +66,8 @@ def ensure_schema(cat):
     if "offset" not in cols:
         cat.db.execute("ALTER TABLE music ADD COLUMN offset INTEGER DEFAULT 0")
         cat.db.execute("ALTER TABLE music ADD COLUMN length INTEGER")
+    if "duration" not in cols:
+        cat.db.execute("ALTER TABLE music ADD COLUMN duration REAL")
 
 
 def item_key(m):
@@ -286,6 +289,53 @@ def module_data(cat, row):
     if row["length"]:
         data = data[row["offset"]:row["offset"] + row["length"]]
     return data
+
+
+def measure_music(cat, progress=None, stop=lambda: False):
+    """Work out the playing time of every module not measured yet (needs libopenmpt).
+    Each disk or archive is opened once for all the tunes on it."""
+    ensure_schema(cat)
+    if music._Lib.get() is None:
+        return {"measured": 0}
+    rows = cat.db.execute("SELECT rowid, * FROM music WHERE duration IS NULL ORDER BY media_id").fetchall()
+    by_media = {}
+    for r in rows:
+        by_media.setdefault(r["media_id"], []).append(r)
+    done = 0
+    for mid, tunes in by_media.items():
+        if stop():
+            break
+        files = {}
+        try:
+            chain = []
+            m = cat.media_by_id(mid)
+            while m is not None:
+                chain.append(m)
+                m = cat.media_by_id(m["parent_id"]) if m["parent_id"] else None
+            chain.reverse()
+            files = {fe.path: fe for fe in _files_in(chain[-1]["kind"], _container_data(cat, chain),
+                                                     chain[-1]["source"]) if fe.read}
+        except Exception:
+            pass
+        for r in tunes:
+            secs = -1.0
+            fe = files.get(r["file"])
+            if fe is not None and r["fmt"] in music.PLAYABLE:
+                try:
+                    data = fe.read()
+                    if r["length"]:
+                        data = data[r["offset"]:r["offset"] + r["length"]]
+                    mod = music.Module(data)
+                    secs = mod.duration
+                    mod.close()
+                except Exception:
+                    secs = -1.0
+            cat.db.execute("UPDATE music SET duration=? WHERE rowid=?", (secs, r["rowid"]))
+            done += 1
+            if progress:
+                progress(done, len(rows), None)
+        cat.db.commit()
+    return {"measured": done}
 
 
 def extract_file(cat, media_id, path):

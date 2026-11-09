@@ -38,6 +38,10 @@ Archives and images inside other images are opened too (up to 3 levels).
 - **Games** filter chip: shows only game disks. An item counts as a game when it has a WHDLoad slave, its name or folder says game ("PD Games Volume", "(Game)", "(demo-playable)"), it has a trainer, its TOSEC name has a games publisher, its title is in the libretro game list, or (not for PD disks) it boots its own loader; the other disks of a set follow. Utilities, music, coverdisks and demos are not counted on the weaker signs. The details panel says why each one counts
 - Games show their picture (title screen) in the list; other items show their own Workbench icon. Score tables and strips of graphics are no longer picked as a disk's picture, and a game with no picture offers a Find pictures online link
 - **Music** filter chip and player: music modules on disks and in archives are recognised by their contents (ProTracker and relatives, OctaMED, FastTracker 2, Scream Tracker 3, Impulse Tracker, Oktalyzer; AHX listed but not played), including ProTracker modules built into music-disk programs. The details panel lists an item's tunes; double-click one to play it. A player bar (pause, next, stop) keeps playing while you browse. Sound is rendered by libopenmpt with Amiga-style filtering and played through Qt Multimedia, so it works on Linux, Windows and macOS (see Setup)
+- **Tunes list:** with the Music chip selected, switch from Disks to Tunes for one row per module: name, format, size, length, item number and where it is. Sort by any column, search, double-click to play (playback carries on down the list as sorted), and Export list… saves it as a spreadsheet. Lengths are measured in the background once
+- OctaMED tunes made from synthesised instruments (e.g. on MED v3.22's demo songs) now play: libxmp takes over whenever libopenmpt reports it can't play a tune properly
+- **Play in emulator** (double-click an item, Ctrl+P, or the button in the details panel): starts the disk in Amiberry or FS-UAE. One disk of a set brings the whole set (Disk 1 in DF0:, Disk 2 in DF1:, all in the disk swapper); an A1200 is suggested for AGA titles, an A600 for ECS, otherwise an A500; Kickstart ROMs are found by their contents (Amiga Forever ROMs with rom.key work); IPF originals inside ZIPs are unpacked for the emulator; WHDLoad archives go to Amiberry's WHDLoad booter
+- **TurboView**, the Amiga side: a Workbench window on Kickstart 2.04 and later (search as you type; Show: all, games, music, problems, duplicates; In: titles, files or tunes; the selected disk's details, contents and music; Boot it / Into DF0: / Into DF1: / Drives buttons, Boot only for disks that start by themselves), and a Shell version on Kickstart 1.3 or with the SHELL option. TurboCAT keeps a catalogue for it in `~/Amiberry/HardDrives/TurboCAT` (written after each look through the disks), and the **TurboView** button starts an emulated A1200 that boots from that folder as `TurboCAT:` with the collection folders mounted read-only. Search titles, files and tunes, see a disk's contents, music and where it is (PC path and Amiga path), and in Amiberry `insert 9` / `boot 9` put a disk in a drive or restart into it (`drives` shows what is in each). Runs on Kickstart 1.3 and later
 - ZIP archives are read (TOSEC packs each disk in a .zip); an archive holding a single disk is listed as that disk
 - Overdumped ADFs (TOSEC "[o]", extra tracks past the end of the disk) are read normally with a note, instead of being reported as a problem and mis-read as high density
 
@@ -69,7 +73,7 @@ Archives and images inside other images are opened too (up to 3 levels).
 Unzip into your home folder, then in a terminal:
 
 ```
-sudo apt install python3-venv xdms libopenmpt0
+sudo apt install python3-venv xdms libopenmpt0 libxmp4
 python3 -m venv ~/turbocat-env
 ~/turbocat-env/bin/pip install amitools lhafile
 ~/turbocat-env/bin/pip install PySide6-Essentials   # for the desktop window
@@ -77,6 +81,11 @@ python3 -m venv ~/turbocat-env
 cd ~/TurboCAT4
 alias tc='~/turbocat-env/bin/python -m turbocat'
 ```
+
+To rebuild TurboView (the Amiga program; a built copy is included in `turbocat/amiga/`), install
+[vbcc](http://phoenix.owl.de/vbcc/) with the m68k-kick13 target and the
+[NDK 3.2](https://aminet.net/package/dev/misc/NDK3.2), then run
+`vc +kick13 -O2 -I<NDK>/Include_H -o turbocat/amiga/TurboView amiga/turboview.c`.
 
 The PySide6 packages must be the same version (`pip list | grep PySide6`).
 
@@ -88,6 +97,8 @@ what is missing when you press play:
   `pacman -S libopenmpt` on Arch). On Windows put `libopenmpt.dll` from
   [lib.openmpt.org](https://lib.openmpt.org/libopenmpt/download/) in `turbocat/lib/`; on macOS
   `brew install libopenmpt`.
+- **libxmp** (optional, `sudo apt install libxmp4`): used for the tunes libopenmpt can't play
+  properly, such as OctaMED songs made from synthesised instruments, which otherwise stay silent.
 - **Qt Multimedia** (`PySide6-Addons`, above), which plays the sound on Linux (PipeWire,
   PulseAudio or ALSA), Windows and macOS.
 
@@ -117,13 +128,16 @@ The catalogue is stored in `~/turbocat.db` (change with `--db FILE`).
 - Watched folders: new, changed and deleted images picked up automatically
 - TurboView catalogue file, re-exported automatically to chosen places (Gotek stick, emulator hard-drive folder, Pi SD card) whenever the catalogue changes
 - Sync to Gotek stick: copy images to the stick with the catalogue, handling slot numbers
-- TurboView for the Amiga (68000, 1 MB, Kickstart 2.04+; Shell mode also on 1.3), with a start-up freshness check that flags new and missing images
+- TurboView for the Amiga: window and Shell versions done; still to come: a start-up freshness check that flags new and missing images, playing modules, and an "I want this" list that TurboCAT copies to the Gotek stick
 
 **Version 1.1**
 - TurboView reads new ADFs on the Amiga itself into a top-up file until the next desktop scan
 
 **Ideas being considered**
 - *Music Modules disks for the Gotek* (a preference): copying modules, rather than whole disks, adds them to a "Music Modules" ADF on the stick, created if needed, instead of using a whole disk per tune. When it is full TurboCAT offers "Music Modules 2", and so on. Thoughts so far: write OFS/FFS with amitools; Amiga-friendly names ("mod.title", at most 30 characters); skip tunes already on the disk; warn about modules too big for a floppy (offer an HD disk) and formats a stock Amiga can't play easily (XM, IT, S3M); tunes found inside music-disk programs become ordinary modules; possibly a bootable disk with a free module player
+
+- *Group disk sets*: a Group button shows each multi-disk game as one row (the lead disk, with the game's picture), expandable to its disks. Sets with missing or damaged disks, or disks from different releases mixed together (e.g. [cr FLT] and [cr CSL] cracks, which often don't work together), are flagged. A Clean up list names the replacement disks needed to complete each set, noting where a good copy is already elsewhere in the catalogue; it can be exported. Thoughts so far: TOSEC names give "Disk N of M", so missing disks are known exactly; other names fall back on volume names and numbering; optionally check sets against TOSEC DAT files for certainty
+
 
 **Later**
 - PFS3/SFS partitions · extended (MFM) ADFs · virus signature database · Windows, Raspberry Pi and Mac packages

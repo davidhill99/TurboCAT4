@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import (QAbstractTableModel, QIODevice, QItemSelectionModel, QModelIndex,
-                            QObject, QRectF, QSize, Qt, QThread, QTimer,
+                            QObject, QRectF, QSize, QSortFilterProxyModel, Qt, QThread, QTimer,
                             QUrl, Signal)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QKeySequence, QPainter, QPen, QPixmap, QShortcut)
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 from . import APP_NAME, VERSION
 from .bootblock import best_title
 from .catalogue import Catalogue
-from . import games, gotek, music, pictures
+from . import emulator, games, gotek, music, pictures, turboview
 from .scanner import rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
@@ -312,6 +312,81 @@ class ItemModel(QAbstractTableModel):
             if col == 3:
                 return it.files
             return STATUS.get(it.status, STATUS["ok"])[0] + (" · Duplicate" if it.dup else "")
+        return None
+
+
+TUNE_COLUMNS = ["TUNE", "FORMAT", "SIZE", "LENGTH", "NO.", "WHERE"]
+SORT_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+def _short_size(n):
+    return f"{n / 1048576:.1f} MB" if n >= 1048576 else f"{max(1, round(n / 1024)):,} KB"
+
+
+def _n(count, word):
+    return f"{count:,} {word}{'' if count == 1 else 's'}"
+
+
+class TuneModel(QAbstractTableModel):
+    """Every music module found, one per row."""
+
+    def __init__(self):
+        super().__init__()
+        self.rows = []          # (music row, item)
+
+    def set_rows(self, rows):
+        self.beginResetModel()
+        self.rows = rows
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(TUNE_COLUMNS)
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal:
+            if role == Qt.ItemDataRole.DisplayRole:
+                return TUNE_COLUMNS[section]
+            if role == Qt.ItemDataRole.TextAlignmentRole:
+                return int((Qt.AlignmentFlag.AlignRight if section in (2, 3) else Qt.AlignmentFlag.AlignLeft)
+                           | Qt.AlignmentFlag.AlignVCenter)
+        return None
+
+    @staticmethod
+    def title(r):
+        name = r["file"].rsplit("/", 1)[-1]
+        return r["title"] or re.sub(r"^(mod|med|xm|s3m)\.", "", name, flags=re.I)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        r, it = self.rows[index.row()]
+        col = index.column()
+        dur = r["duration"]
+        if role == Qt.ItemDataRole.DisplayRole:
+            return [self.title(r),
+                    r["fmt"] + (" (in a program)" if r["length"] else ""),
+                    _short_size(r["size"] or 0),
+                    music.fmt_time(dur) if dur and dur > 0 else ("can't play" if dur is not None else "…"),
+                    f"#{it.number:04d}",
+                    r["shown"]][col]
+        if role == SORT_ROLE:
+            return [self.title(r).lower(), r["fmt"], r["size"] or 0, dur or 0, it.number,
+                    r["shown"].lower()][col]
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return f"{self.title(r)}\n{r['shown']}\nDouble-click to play"
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return int((Qt.AlignmentFlag.AlignRight if col in (2, 3) else Qt.AlignmentFlag.AlignLeft)
+                       | Qt.AlignmentFlag.AlignVCenter)
+        if role == Qt.ItemDataRole.ForegroundRole and col in (1, 4, 5):
+            return C["ink-muted"]
+        if role == Qt.ItemDataRole.FontRole:
+            return data_font(12) if col in (2, 3, 4) else (ui_font(13, QFont.Weight.Medium) if col == 0
+                                                         else ui_font(12))
+        if role == Qt.ItemDataRole.DecorationRole and col == 0:
+            return QIcon(icon("music", 16))
         return None
 
 
@@ -633,7 +708,8 @@ class DetailsPanel(QFrame):
     """Everything about the selected item: the right-hand panel of the design."""
     FACTS = ["Filesystem", "Bootblock", "Contents", "Status", "Size", "Scanned"]
 
-    def __init__(self, cat, on_select_number, on_copy=None, on_online=None, on_play=None):
+    def __init__(self, cat, on_select_number, on_copy=None, on_online=None, on_play=None,
+                 on_start=None):
         super().__init__()
         self.cat = cat
         self.on_select_number = on_select_number
@@ -759,6 +835,14 @@ class DetailsPanel(QFrame):
         self.show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.show_btn.clicked.connect(self.show_in_folder)
         buttons.addWidget(self.show_btn)
+        self.play_btn = QPushButton("Play in emulator")
+        self.play_btn.setObjectName("primary")
+        self.play_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
+        self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play_btn.setToolTip("Start this disk (and the rest of its set) in Amiberry or FS-UAE "
+                                 "(Ctrl+P, or double-click it in the list)")
+        self.play_btn.clicked.connect(lambda: on_start and self.item_id and on_start([self.item_id]))
+        buttons.insertWidget(0, self.play_btn)
         self.copy_btn = QPushButton("Copy to Gotek stick")
         self.copy_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -814,6 +898,9 @@ class DetailsPanel(QFrame):
         self.item_id = m["id"]
         floppy = any(r["kind"] in gotek.FLOPPY_KINDS and r["status"] != "empty" for r in [m] + kids)
         self.copy_btn.setVisible(floppy and not m["whd_name"])
+        ipf = item.game and bool(self.cat.db.execute(
+            "SELECT 1 FROM files WHERE media_id=? AND lower(path) LIKE '%.ipf' LIMIT 1", (m["id"],)).fetchone())
+        self.play_btn.setVisible(floppy or ipf or (bool(m["whd_name"]) and kind == "lha"))
         # An archive holding one disk image is described by that disk.
         d = m
         direct = [k for k in kids if k["parent_id"] == m["id"]]
@@ -1196,7 +1283,7 @@ class ModulePlayer(QObject):
         fmt.setSampleRate(music.RATE)
         if not device.isFormatSupported(fmt):
             fmt.setSampleRate(device.preferredFormat().sampleRate() or 44100)
-        module = music.Module(data)
+        module = music.open_module(data, fmt.sampleRate())
         self.module = module
         self.stream = ModuleStream(module, fmt.sampleRate())
         self.sink = QAudioSink(device, fmt, self)
@@ -1248,7 +1335,7 @@ class PlayerBar(QFrame):
         self.setObjectName("playerBar")
         self.player = ModulePlayer()
         self.player.ended.connect(self._ended)
-        self.playlist, self.index, self.label = [], 0, ""
+        self.playlist, self.index, self.label, self.labels = [], 0, "", None
         h = QHBoxLayout(self)
         h.setContentsMargins(24, 8, 24, 8)
         h.setSpacing(12)
@@ -1287,7 +1374,7 @@ class PlayerBar(QFrame):
         self.duration = 0.0
         self.hide()
 
-    def play(self, rows, index, label=""):
+    def play(self, rows, index, label="", labels=None):
         ok, why = music.available()
         self.show()
         if not ok:
@@ -1295,6 +1382,7 @@ class PlayerBar(QFrame):
             self.time.setText("")
             return
         self.playlist, self.index, self.label = list(rows), index, label
+        self.labels = labels
         self._start()
 
     def _start(self):
@@ -1314,8 +1402,9 @@ class PlayerBar(QFrame):
         bits = [f"{title}"] + ([f"by {artist}"] if artist else []) + [kind]
         if len(self.playlist) > 1:
             bits.append(f"{self.index + 1} of {len(self.playlist)}")
-        if self.label:
-            bits.append(self.label)
+        label = self.labels[self.index] if self.labels else self.label
+        if label:
+            bits.append(label)
         self.what.setText(" · ".join(bits))
         self.what.setToolTip(r["shown"])
         self.pause_btn.setText("Pause")
@@ -1390,12 +1479,145 @@ class PictureWorker(QThread):
             stop = lambda: self.stop_wanted
             res = {"disk": pictures.build(
                 cat, lambda i, n, m: self.progress.emit("disk", i, n), stop)}
+            if not self.stop_wanted:
+                res["lengths"] = pictures.measure_music(
+                    cat, lambda i, n, m: self.progress.emit("lengths", i, n), stop)
             if self.online and not self.stop_wanted:
                 res["online"] = pictures.lookup_online(
                     cat, lambda i, n, m: self.progress.emit("online", i, n), stop)
+            if not self.stop_wanted:          # keep the Amiga's copy of the catalogue up to date
+                try:
+                    folder = cat.get_meta("turboview_dir") or turboview.default_folder()
+                    turboview.install(folder)
+                    res["turboview"] = turboview.export(cat, load_items(cat), folder)
+                except Exception as ex:
+                    res["turboview_error"] = str(ex)
             self.done.emit(res)
         except Exception as ex:
             self.failed.emit(str(ex))
+
+
+# ---------------------------------------------------------------- emulators
+
+class PlayDialog(QDialog):
+    """Confirm what will be started, and in which emulator and Amiga, then start it."""
+
+    def __init__(self, parent, cat, ids, emulators):
+        super().__init__(parent)
+        self.cat, self.emulators = cat, emulators
+        self.setObjectName("dialog")
+        self.setWindowTitle("Play in emulator")
+        self.setMinimumWidth(600)
+        self.files, self.whdload, skipped, names = emulator.disk_files(cat, ids)
+        self.roms = emulator.find_kickstarts()
+        guess = emulator.guess_model(names)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 22, 24, 20)
+        v.setSpacing(12)
+        title = names[0] if names else "Nothing to play"
+        head = QLabel(_esc(re.split(r"\s*[\(\[]", title, maxsplit=1)[0]) if names else title)
+        head.setFont(ui_font(20, QFont.Weight.Bold))
+        v.addWidget(head)
+        if self.whdload:
+            what = "WHDLoad game, started by Amiberry's WHDLoad booter"
+        else:
+            n = len(self.files)
+            what = (f"{n} disk{'s' if n != 1 else ''}: the first in DF0:"
+                    + (", the second in DF1:, all of them in the disk swapper" if n > 1 else ""))
+        v.addWidget(_wrap_label(what, ui_font(13), "muted"))
+        if self.files:
+            lst = QListWidget()
+            lst.setObjectName("diskList")
+            lst.setFont(ui_font(13))
+            lst.setIconSize(QSize(16, 16))
+            lst.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            lst.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            lst.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+            lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            for i, f in enumerate(self.files):
+                drive = f"DF{i}:  " if i < 2 else "swap:  "
+                it = QListWidgetItem(drive + os.path.basename(f))
+                it.setIcon(QIcon(icon("disk", 16)))
+                it.setToolTip(f)
+                lst.addItem(it)
+            lst.setFixedHeight(min(len(self.files), 6) * (max(lst.sizeHintForRow(0), 20) + 6) + 12)
+            v.addWidget(lst)
+        if skipped:
+            v.addWidget(_wrap_label("Left out: " + "; ".join(f"{n} ({w})" for n, w in skipped[:4]),
+                                    ui_font(12), "muted"))
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        grid.addWidget(QLabel("Emulator"), 0, 0)
+        self.emu_box = QComboBox()
+        names_ = {"amiberry": "Amiberry", "fs-uae": "FS-UAE"}
+        for key in ("amiberry", "fs-uae"):
+            if key in emulators:
+                self.emu_box.addItem(names_[key], key)
+        last = cat.get_meta("emulator", "amiberry")
+        if self.whdload:                               # only Amiberry boots WHDLoad archives itself
+            i = self.emu_box.findData("amiberry")
+            for j in reversed(range(self.emu_box.count())):
+                if j != i:
+                    self.emu_box.removeItem(j)
+        self.emu_box.setCurrentIndex(max(0, self.emu_box.findData(last)))
+        grid.addWidget(self.emu_box, 0, 1)
+        grid.addWidget(QLabel("Amiga"), 1, 0)
+        self.model_box = QComboBox()
+        labels = {"A500": "A500 (Kickstart 1.3, OCS)", "A600": "A600 (Kickstart 2.05, ECS)",
+                  "A1200": "A1200 (Kickstart 3.1, AGA)"}
+        for mdl in emulator.MODELS:
+            self.model_box.addItem(labels[mdl] + ("   — suggested" if mdl == guess else ""), mdl)
+        self.model_box.setCurrentIndex(emulator.MODELS.index(guess))
+        grid.addWidget(self.model_box, 1, 1)
+        for w in (self.emu_box, self.model_box):
+            w.setFont(ui_font(13))
+            w.setMinimumHeight(36)
+        for r in range(2):
+            grid.itemAtPosition(r, 0).widget().setFont(ui_font(13, QFont.Weight.DemiBold))
+        grid.setColumnStretch(1, 1)
+        v.addLayout(grid)
+        self.rom_note = _wrap_label("", ui_font(12), "muted")
+        v.addWidget(self.rom_note)
+        self.model_box.currentIndexChanged.connect(self._rom_text)
+        self._rom_text()
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.go = QPushButton("Start")
+        self.go.setObjectName("primary")
+        self.go.setDefault(True)
+        self.go.clicked.connect(self.start)
+        self.go.setEnabled(bool(self.files or self.whdload))
+        for b in (cancel, self.go):
+            b.setFont(ui_font(14, QFont.Weight.DemiBold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            btns.addWidget(b)
+        v.addLayout(btns)
+
+    def _rom_text(self):
+        mdl = self.model_box.currentData()
+        rom = self.roms.get(mdl)
+        self.rom_note.setText(f"Kickstart: {rom}" if rom else
+                              "No matching Kickstart ROM found; the emulator will use its own "
+                              "choice (or AROS).")
+
+    def start(self):
+        emu = self.emu_box.currentData()
+        mdl = self.model_box.currentData()
+        self.cat.set_meta("emulator", emu)
+        cmd = emulator.command(emu, self.emulators[emu], mdl, self.roms.get(mdl), self.files,
+                               self.whdload)
+        try:
+            emulator.launch(cmd)
+        except OSError as ex:
+            QMessageBox.warning(self, "Play in emulator", f"The emulator could not be started: {ex}")
+            return
+        self.accept()
 
 
 # ---------------------------------------------------------------- Gotek
@@ -1722,10 +1944,13 @@ class MainWindow(QMainWindow):
         self.gotek_btn = QPushButton("Copy to Gotek stick")
         self.gotek_btn.setToolTip("Copy the selected disks to a USB stick for a Gotek drive (Ctrl+G). "
                                   "Select several with Ctrl or Shift.")
+        self.tv_btn = QPushButton("TurboView")
+        self.tv_btn.setToolTip("Start an emulated Amiga with TurboView, the Amiga side of TurboCAT, "
+                               "and your collection folders mounted as drives")
         self.online_btn = QPushButton("Find pictures online")
         self.online_btn.setToolTip("Look up title screens for disks that have no picture of their own, "
                                    "in the libretro-thumbnails collection on GitHub")
-        for b in (self.scan_btn, self.rescan_btn, self.gotek_btn, self.online_btn):
+        for b in (self.scan_btn, self.rescan_btn, self.gotek_btn, self.online_btn, self.tv_btn):
             b.setFont(ui_font(14, QFont.Weight.DemiBold))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             hl.addWidget(b)
@@ -1733,6 +1958,7 @@ class MainWindow(QMainWindow):
         self.rescan_btn.clicked.connect(self.rescan)
         self.gotek_btn.clicked.connect(lambda: self.copy_to_gotek())
         self.online_btn.clicked.connect(self.find_online)
+        self.tv_btn.clicked.connect(self.start_turboview)
         v.addWidget(head)
 
         # Search
@@ -1796,7 +2022,33 @@ class MainWindow(QMainWindow):
         sb.addWidget(self.stop_btn)
         self.scan_bar.hide()
         sl.addWidget(self.scan_bar)
-        sl.addWidget(self.result_label)
+        res_row = QHBoxLayout()
+        res_row.setSpacing(8)
+        res_row.addWidget(self.result_label, 1)
+        self.view_disks = QPushButton("Disks")
+        self.view_tunes = QPushButton("Tunes")
+        self.view_group = QButtonGroup(self)
+        for b in (self.view_disks, self.view_tunes):
+            b.setObjectName("segment")
+            b.setCheckable(True)
+            b.setFont(ui_font(12, QFont.Weight.DemiBold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.view_group.addButton(b)
+            res_row.addWidget(b)
+        self.view_disks.setChecked(True)
+        self.view_disks.setToolTip("One row per disk or archive that has music on it")
+        self.view_tunes.setToolTip("One row per tune: every module TurboCAT has found")
+        self.view_disks.clicked.connect(lambda: self.set_tune_view(False))
+        self.view_tunes.clicked.connect(lambda: self.set_tune_view(True))
+        self.export_tunes_btn = QPushButton("Export list…")
+        self.export_tunes_btn.setObjectName("segment")
+        self.export_tunes_btn.setFont(ui_font(12, QFont.Weight.DemiBold))
+        self.export_tunes_btn.setToolTip("Save this list of tunes as a spreadsheet (CSV)")
+        self.export_tunes_btn.clicked.connect(self.export_tunes)
+        res_row.addSpacing(8)
+        res_row.addWidget(self.export_tunes_btn)
+        sl.addLayout(res_row)
+        self.tune_view = False
         v.addWidget(sw)
 
         # List (or an empty / nothing-found message)
@@ -1840,16 +2092,47 @@ class MainWindow(QMainWindow):
         self.message.setFont(ui_font(15))
         self.message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
+        self.tune_model = TuneModel()
+        self.tune_proxy = QSortFilterProxyModel(self)
+        self.tune_proxy.setSourceModel(self.tune_model)
+        self.tune_proxy.setSortRole(SORT_ROLE)
+        self.tunes_table = QTableView()
+        self.tunes_table.setModel(self.tune_proxy)
+        self.tunes_table.setObjectName("tunesTable")
+        self.tunes_table.setSortingEnabled(True)
+        self.tunes_table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.tunes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tunes_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tunes_table.setShowGrid(False)
+        self.tunes_table.setWordWrap(False)
+        self.tunes_table.setIconSize(QSize(16, 16))
+        self.tunes_table.verticalHeader().hide()
+        self.tunes_table.verticalHeader().setDefaultSectionSize(34)
+        self.tunes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tunes_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.tunes_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        th2 = self.tunes_table.horizontalHeader()
+        th2.setFont(hf)
+        th2.setHighlightSections(False)
+        th2.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        th2.setStretchLastSection(True)
+        for col, width in enumerate((260, 170, 80, 80, 70)):
+            self.tunes_table.setColumnWidth(col, width)
+        self.tunes_table.doubleClicked.connect(self._play_tune)
+        self.tunes_table.activated.connect(self._play_tune)
+        self.tunes_table.selectionModel().currentRowChanged.connect(self._tune_row_changed)
+
         self.stack = QStackedWidget()
         self.stack.addWidget(self.table)
         self.stack.addWidget(self.message)
+        self.stack.addWidget(self.tunes_table)
         panel = QFrame()
         panel.setObjectName("panel")
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(1, 1, 1, 1)
         pl.addWidget(self.stack)
         self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek, self.find_online,
-                                    self.play_music)
+                                    self.play_music, self.play_in_emulator)
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("split")
         split.setHandleWidth(20)
@@ -1895,6 +2178,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self.search.edit, activated=self.search.edit.clear)
         QShortcut(QKeySequence(Qt.Key.Key_F5), self, activated=self.rescan)
         QShortcut(QKeySequence("Ctrl+G"), self, activated=lambda: self.copy_to_gotek())
+        QShortcut(QKeySequence("Ctrl+P"), self, activated=lambda: self.play_in_emulator())
+        self.table.doubleClicked.connect(lambda _i: self.play_in_emulator())
+        self.emulators = None
         self.worker = None
         self.hide_bar = QTimer(self, singleShot=True, interval=10000)
         self.hide_bar.timeout.connect(self.scan_bar.hide)
@@ -1929,6 +2215,43 @@ class MainWindow(QMainWindow):
     def _selection_changed(self):
         n = len(self.table.selectionModel().selectedRows())
         self.gotek_btn.setText(f"Copy {n:,} to Gotek stick" if n > 1 else "Copy to Gotek stick")
+
+    def play_in_emulator(self, ids=None):
+        """Start the selected disks in Amiberry or FS-UAE (a single disk brings its whole set)."""
+        ids = ids or self.selected_ids()
+        if not ids:
+            return
+        if self.emulators is None:
+            self.emulators = emulator.find_emulators()
+        if not self.emulators:
+            QMessageBox.information(self, "Play in emulator",
+                                    "Neither Amiberry nor FS-UAE was found. Install one of them "
+                                    "(Amiberry is on Flathub) and try again.")
+            return
+        dlg = PlayDialog(self, self.cat, ids, self.emulators)
+        dlg.exec()
+
+    def start_turboview(self):
+        """Boot an emulated A1200 from the TurboView folder, with the collection mounted."""
+        folder = self.cat.get_meta("turboview_dir") or turboview.default_folder()
+        if not turboview.install(folder) or not os.path.exists(os.path.join(folder, "TurboCAT.cat")):
+            missing = "the TurboView program" if not os.path.exists(os.path.join(folder, "TurboView")) \
+                else "the catalogue (it is written after the next look through the disks)"
+            QMessageBox.information(self, "TurboView", f"TurboView can't start yet: {missing} "
+                                    f"is not in {folder}.")
+            return
+        if self.emulators is None:
+            self.emulators = emulator.find_emulators()
+        emu = self.cat.get_meta("emulator", "amiberry")
+        if emu not in (self.emulators or {}):
+            emu = next(iter(self.emulators or {}), None)
+        if emu is None:
+            QMessageBox.information(self, "TurboView", "Neither Amiberry nor FS-UAE was found.")
+            return
+        rom = emulator.find_kickstarts().get("A1200")
+        cmd = emulator.turboview_command(emu, self.emulators[emu], rom, folder,
+                                         turboview.roots_with_volumes(self.cat))
+        emulator.launch(cmd)
 
     def play_music(self, rows, index):
         it = next((x for x in self.model.items if x.id == self.current_id), None)
@@ -2150,7 +2473,9 @@ class MainWindow(QMainWindow):
         if not n or i >= n:
             return
         if phase == "disk":
-            self._pic_note(f"Looking for pictures on disks… {i:,} of {n:,}")
+            self._pic_note(f"Looking for pictures and music on disks… {i:,} of {n:,}")
+        elif phase == "lengths":
+            self._pic_note(f"Measuring tunes… {i:,} of {n:,}")
         else:
             self._pic_note(f"Looking for pictures online… {i:,} of {n:,}")
 
@@ -2159,6 +2484,8 @@ class MainWindow(QMainWindow):
         if res["disk"]["looked"]:
             bits.append(f"{res['disk']['found']:,} of {res['disk']['looked']:,} new items had pictures "
                         "or icons on the disk")
+        if res.get("turboview_error"):
+            bits.append(f"TurboView catalogue not written: {res['turboview_error']}")
         if "online" in res and res["online"]["looked"]:
             bits.append(f"{res['online']['found']:,} pictures found online")
         self.reload()
@@ -2271,20 +2598,115 @@ class MainWindow(QMainWindow):
                         sm.select(self.model.index(row, 0), flags)
         else:
             self.details.clear()
+        music_view = self.filter == "music"
+        for b in (self.view_disks, self.view_tunes):
+            b.setVisible(music_view)
+        self.export_tunes_btn.setVisible(music_view and self.tune_view)
         if not self.all_items:
             self.message.setText(
                 "The catalogue is empty.\n\nClick Scan folder… and choose the folder where you "
                 "keep your Amiga disk images.")
             self.stack.setCurrentWidget(self.message)
+        elif music_view and self.tune_view:
+            self._fill_tunes(text)
         elif not shown and text and self.filter != "all":
             self.message.setText(f"No {label.lower()} among the items that match “{text}”.")
+            self.stack.setCurrentWidget(self.message)
         elif not shown and text:
             self.message.setText(f"Nothing found for “{text}”.")
+            self.stack.setCurrentWidget(self.message)
         elif not shown:
             self.message.setText(f"No {label.lower()} in the catalogue.")
             self.stack.setCurrentWidget(self.message)
         else:
             self.stack.setCurrentWidget(self.table)
+
+    # -------------------------------------------------------------- tunes view
+    def set_tune_view(self, on):
+        self.tune_view = on
+        (self.view_tunes if on else self.view_disks).setChecked(True)
+        self.run_search()
+
+    def _fill_tunes(self, text):
+        """Every tune found, or those whose name, format, file or disk matches the search."""
+        by_key = {}
+        for it in self.all_items:
+            by_key.setdefault(it.key, it)
+        rows = []
+        low = text.lower()
+        for key, tunes in pictures.music_by_key(self.cat).items():
+            it = by_key.get(key)
+            if it is None:
+                continue
+            for r in tunes:
+                if low and not any(low in (x or "").lower() for x in
+                                   (r["title"], r["file"], r["shown"], r["fmt"], it.file, it.title)):
+                    continue
+                rows.append((r, it))
+        keep = self._current_tune()
+        self.tune_model.set_rows(rows)
+        total = sum(r["duration"] for r, _ in rows if r["duration"] and r["duration"] > 0)
+        hours = f"{total / 3600:.1f} hours" if total >= 3600 else f"{total / 60:.0f} minutes"
+        items = len({it.id for _, it in rows})
+        what = f"{_n(len(rows), 'tune')} in {_n(items, 'item')}, {hours} of music"
+        self.result_label.setText(what + (f" · matching “{text}”" if text else ""))
+        if not rows:
+            self.message.setText(f"No tunes match “{text}”." if text else
+                                 "No music modules found yet. TurboCAT looks for them in the "
+                                 "background after each scan.")
+            self.stack.setCurrentWidget(self.message)
+            return
+        self.stack.setCurrentWidget(self.tunes_table)
+        row = 0
+        if keep is not None:
+            for i in range(self.tune_proxy.rowCount()):
+                r, _ = self.tune_model.rows[self.tune_proxy.mapToSource(self.tune_proxy.index(i, 0)).row()]
+                if (r["key"], r["file"], r["offset"]) == keep:
+                    row = i
+                    break
+        self.tunes_table.setCurrentIndex(self.tune_proxy.index(row, 0))
+
+    def _current_tune(self):
+        idx = self.tunes_table.currentIndex()
+        if not idx.isValid() or not self.tune_model.rows:
+            return None
+        r, _ = self.tune_model.rows[self.tune_proxy.mapToSource(idx).row()]
+        return (r["key"], r["file"], r["offset"])
+
+    def _tune_row_changed(self, current, _previous):
+        if not current.isValid():
+            return
+        _, it = self.tune_model.rows[self.tune_proxy.mapToSource(current).row()]
+        if it.id != self.current_id:
+            self.current_id = it.id
+            self.details.show_item(it)
+
+    def _play_tune(self, index):
+        """Play the tune, then carry on down the list as it is sorted."""
+        rows, labels = [], []
+        for i in range(self.tune_proxy.rowCount()):
+            r, it = self.tune_model.rows[self.tune_proxy.mapToSource(self.tune_proxy.index(i, 0)).row()]
+            rows.append(r)
+            labels.append(f"#{it.number:04d}")
+        self.player_bar.play(rows, index.row(), labels=labels)
+
+    def export_tunes(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save the list of tunes",
+                                              os.path.expanduser("~/TurboCAT tunes.csv"),
+                                              "Spreadsheet (*.csv)")
+        if not path:
+            return
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["Tune", "Format", "Size (bytes)", "Length", "Item", "Item file", "Where"])
+            for i in range(self.tune_proxy.rowCount()):
+                r, it = self.tune_model.rows[self.tune_proxy.mapToSource(self.tune_proxy.index(i, 0)).row()]
+                dur = r["duration"]
+                w.writerow([TuneModel.title(r), r["fmt"], r["size"],
+                            music.fmt_time(dur) if dur and dur > 0 else "",
+                            f"#{it.number:04d}", it.path, r["shown"]])
+        self.result_label.setText(f"Saved {self.tune_proxy.rowCount():,} tunes to {path}")
 
     def _style(self):
         c = {k: v.name() for k, v in C.items()}
@@ -2347,6 +2769,11 @@ class MainWindow(QMainWindow):
             QComboBox QAbstractItemView {{ color: {c['ink']}; background: {c['surface']};
                                            selection-background-color: {c['accent-tint']};
                                            selection-color: {c['accent-ink']}; }}
+            QPushButton#segment {{ min-height: 28px; padding: 0 12px; border-radius: 6px; }}
+            QPushButton#segment:checked {{ background: {c['accent-tint']}; border: 1px solid {c['accent']};
+                                           color: {c['accent-ink']}; }}
+            QTableView#tunesTable::item {{ padding: 0 8px; border-bottom: 1px solid {c['row-line']}; }}
+            QTableView#tunesTable::item:selected {{ background: {c['accent-tint']}; color: {c['accent-ink']}; }}
             QPushButton#small {{ min-height: 30px; padding: 0 12px; }}
             #playerBar {{ background: {c['accent-tint']}; border-top: 1px solid {c['line']}; }}
             #playerBar QLabel {{ color: {c['accent-ink']}; }}

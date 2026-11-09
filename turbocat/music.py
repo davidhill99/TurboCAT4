@@ -148,7 +148,7 @@ class _Lib:
 
 def available():
     """(ok, reason): can modules be played on this computer?"""
-    if _Lib.get() is None:
+    if _Lib.get() is None and _Xmp.get() is None:
         return False, ("libopenmpt is not installed (on Debian, Ubuntu or Mint: "
                        "sudo apt install libopenmpt0)")
     try:
@@ -156,6 +156,10 @@ def available():
     except ImportError:
         return False, "Qt Multimedia is not installed (pip install PySide6-Addons)"
     return True, ""
+
+
+_LOG = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
+_QUIET = _LOG(lambda message, user: None)      # libopenmpt's warnings go nowhere
 
 
 class Module:
@@ -170,7 +174,8 @@ class Module:
         err = ctypes.c_int(0)
         msg = ctypes.c_char_p()
         self.mod = lib.openmpt_module_create_from_memory2(
-            self._buf, len(data), None, None, None, None, ctypes.byref(err), ctypes.byref(msg), None)
+            self._buf, len(data), ctypes.cast(_QUIET, ctypes.c_void_p), None, None, None,
+            ctypes.byref(err), ctypes.byref(msg), None)
         if not self.mod:
             raise ValueError("this module can't be played" +
                              (f" ({msg.value.decode(errors='replace')})" if msg.value else ""))
@@ -204,6 +209,129 @@ class Module:
         if self.mod:
             self.lib.openmpt_module_destroy(self.mod)
             self.mod = None
+
+
+# ---------------------------------------------------------------- libxmp (second opinion)
+
+class _Xmp:
+    lib = None
+
+    @classmethod
+    def get(cls):
+        if cls.lib is None:
+            lib = None
+            for name in filter(None, [ctypes.util.find_library("xmp"), "libxmp.so.4", "libxmp.dll",
+                                      "/opt/homebrew/lib/libxmp.dylib", "libxmp.dylib"]):
+                try:
+                    lib = ctypes.CDLL(name)
+                    break
+                except OSError:
+                    continue
+            if lib is None:
+                cls.lib = False
+                return None
+            c = ctypes
+            lib.xmp_create_context.restype = c.c_void_p
+            lib.xmp_load_module_from_memory.argtypes = [c.c_void_p, c.c_void_p, c.c_long]
+            lib.xmp_start_player.argtypes = [c.c_void_p, c.c_int, c.c_int]
+            lib.xmp_play_buffer.argtypes = [c.c_void_p, c.c_void_p, c.c_int, c.c_int]
+            lib.xmp_get_frame_info.argtypes = [c.c_void_p, c.c_void_p]
+            lib.xmp_get_module_info.argtypes = [c.c_void_p, c.c_void_p]
+            lib.xmp_seek_time.argtypes = [c.c_void_p, c.c_int]
+            lib.xmp_set_player.argtypes = [c.c_void_p, c.c_int, c.c_int]
+            for f in ("xmp_end_player", "xmp_release_module", "xmp_free_context"):
+                getattr(lib, f).argtypes = [c.c_void_p]
+            cls.lib = lib
+        return cls.lib or None
+
+
+class XmpModule:
+    """The same as Module, played by libxmp: used for tunes libopenmpt can't play properly,
+    such as OctaMED songs built from synthesised instruments."""
+
+    def __init__(self, data, rate=RATE):
+        lib = _Xmp.get()
+        if lib is None:
+            raise RuntimeError("libxmp is not installed")
+        self.lib, self.rate = lib, rate
+        self._buf = ctypes.create_string_buffer(bytes(data), len(data))
+        self.ctx = lib.xmp_create_context()
+        if lib.xmp_load_module_from_memory(self.ctx, self._buf, len(data)) != 0:
+            lib.xmp_free_context(self.ctx)
+            self.ctx = None
+            raise ValueError("this module can't be played")
+        lib.xmp_start_player(self.ctx, rate, 0)                # 16-bit stereo
+        lib.xmp_set_player(self.ctx, 1, 70)                    # XMP_PLAYER_MIX: stereo separation %
+        self.ended = False
+        frame = ctypes.create_string_buffer(16384)
+        lib.xmp_get_frame_info(self.ctx, frame)
+        self._duration = int.from_bytes(frame.raw[32:36], "little", signed=True) / 1000.0
+        mi = ctypes.create_string_buffer(64)
+        lib.xmp_get_module_info(self.ctx, mi)
+        mod_ptr = int.from_bytes(mi.raw[24:32], "little") if ctypes.sizeof(ctypes.c_void_p) == 8 \
+            else int.from_bytes(mi.raw[20:24], "little")
+        self._name = self._type = ""
+        if mod_ptr:
+            self._name = ctypes.string_at(mod_ptr, 64).split(b"\0")[0].decode("latin-1").strip()
+            self._type = ctypes.string_at(mod_ptr + 64, 64).split(b"\0")[0].decode("latin-1").strip()
+
+    def meta(self, key):
+        if key == "type_long":
+            return (self._type or "Module") + " (played by libxmp)"
+        if key == "title":
+            return self._name
+        return ""
+
+    @property
+    def mod(self):                    # for code that checks whether the module is still open
+        return self.ctx
+
+    @property
+    def duration(self):
+        return self._duration
+
+    def seek(self, seconds):
+        self.lib.xmp_seek_time(self.ctx, int(seconds * 1000))
+        return seconds
+
+    def render(self, frames, rate=RATE):
+        if self.ended or not self.ctx:
+            return b""
+        out = ctypes.create_string_buffer(frames * 4)
+        if self.lib.xmp_play_buffer(self.ctx, out, frames * 4, 1) != 0:    # play once
+            self.ended = True
+            return b""
+        return out.raw
+
+    def close(self):
+        if self.ctx:
+            self.lib.xmp_end_player(self.ctx)
+            self.lib.xmp_release_module(self.ctx)
+            self.lib.xmp_free_context(self.ctx)
+            self.ctx = None
+
+
+def open_module(data, rate=RATE):
+    """The best player for this tune: libopenmpt, or libxmp when libopenmpt can't play it
+    properly (it says so in its warnings, e.g. synthesised MED instruments) or can't open it."""
+    mod = None
+    try:
+        mod = Module(data)
+    except Exception:
+        mod = None
+    if mod is not None and "not supported" not in mod.meta("warnings"):
+        return mod
+    if _Xmp.get() is not None:
+        try:
+            x = XmpModule(data, rate)
+            if mod is not None:
+                mod.close()
+            return x
+        except Exception:
+            pass
+    if mod is None:
+        raise ValueError("this module can't be played")
+    return mod
 
 
 def fmt_time(sec):
