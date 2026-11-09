@@ -68,7 +68,11 @@ def _rom_info(path):
         except OSError:
             return None
         body = data[11:]
-        data = bytes(b ^ key[i % len(key)] for i, b in enumerate(body))
+        if not key:
+            return None
+        # XOR with the repeated key, all at once (a byte at a time took about a second per ROM).
+        pad = (key * (len(body) // len(key) + 1))[:len(body)]
+        data = (int.from_bytes(body, "big") ^ int.from_bytes(pad, "big")).to_bytes(len(body), "big")
     if data[:2] not in (b"\x11\x11", b"\x11\x14"):         # Kickstart ROMs start with 1111 / 1114
         return None
     major = int.from_bytes(data[12:14], "big")

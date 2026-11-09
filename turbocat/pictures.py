@@ -422,7 +422,11 @@ def clean_title(name):
     return " ".join(base.split()).strip(" -")
 
 
-def _cached_json(path, url, max_age_days=30):
+class Stopped(Exception):
+    """The user stopped the search (or is closing TurboCAT) while something was downloading."""
+
+
+def _cached_json(path, url, max_age_days=30, stop=lambda: False):
     try:
         if time.time() - os.path.getmtime(path) < max_age_days * 86400:
             with open(path) as f:
@@ -430,8 +434,16 @@ def _cached_json(path, url, max_age_days=30):
     except (OSError, ValueError):
         pass
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        data = json.loads(r.read())
+    chunks = []
+    with urllib.request.urlopen(req, timeout=20) as r:
+        while True:                         # a few MB: read in pieces so Stop works
+            if stop():
+                raise Stopped()
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    data = json.loads(b"".join(chunks))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path + ".part", "w") as f:
         json.dump(data, f)
@@ -439,9 +451,9 @@ def _cached_json(path, url, max_age_days=30):
     return data
 
 
-def online_index():
+def online_index(stop=lambda: False):
     """normalised title -> {folder: file path} from the libretro-thumbnails Amiga collection."""
-    tree = _cached_json(os.path.join(CACHE, "libretro-amiga.json"), LR_TREE)
+    tree = _cached_json(os.path.join(CACHE, "libretro-amiga.json"), LR_TREE, stop=stop)
     index = {}
     for e in tree.get("tree", []):
         p = e.get("path", "")
@@ -478,19 +490,25 @@ def item_titles(cat, m):
     return out
 
 
-def lookup_online(cat, progress=None, stop=lambda: False, force=False):
-    """For items without a picture of their own, fetch one from libretro-thumbnails."""
+def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=None):
+    """For items without a picture of their own, fetch one from libretro-thumbnails.
+    known: {top id: proper name} for disks identified by checksum: their real titles are tried
+    first, and they are looked up again even if their file name found nothing before."""
+    known = known or {}
     ensure_schema(cat)
     if progress:
         progress(0, 0, None)          # 0 of 0: fetching the list of pictures (a few MB, cached)
-    index = online_index()
+    try:
+        index = online_index(stop)
+    except Stopped:
+        return {"looked": 0, "found": 0, "stopped": True}
     thumbs = thumbs_by_key(cat)
     todo = []
     for m in cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number"):
         t = thumbs.get(item_key(m))
         if t is not None and t["pic"]:
             continue
-        if t is not None and t["online"] and not force:
+        if t is not None and t["online"] and not force and m["id"] not in known:
             continue
         if m["status"] == "empty" or m["kind"] in ("hdf", "folder"):
             continue
@@ -507,7 +525,10 @@ def lookup_online(cat, progress=None, stop=lambda: False, force=False):
         key = item_key(m)
         t = thumbs.get(key)
         match = None
-        for name in item_titles(cat, m):
+        titles = item_titles(cat, m)
+        if m["id"] in known:
+            titles = [clean_title(known[m["id"]])] + titles
+        for name in titles:
             slot = index.get(normal(name))
             if slot:
                 match = (name, next(slot[f] for f in LR_ORDER if f in slot))

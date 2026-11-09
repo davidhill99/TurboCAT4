@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 from . import APP_NAME, VERSION
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
-from . import dups as dupes, emulator, games, gotek, music, pictures, turboview
+from . import datlists, dups as dupes, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
 from .scanner import rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
@@ -69,6 +69,8 @@ DISK_KINDS = ("adf", "dms", "adz", "hdf")
 KIND_ICON = {"adf": "disk", "dms": "disk", "adz": "disk", "hdf": "harddrive",
              "lha": "archive", "lzx": "archive", "zip": "archive", "folder": "folder",
              "module": "music"}
+SET_TONE = {"ok": ("ok", "ok-tint", "ok"), "warn": ("warn", "warn-tint", "warning"),
+            "problem": ("problem", "problem-tint", "problem")}
 STATUS = {"ok": ("OK", "ok", "ok-tint", None),
           "warning": ("Warning", "warn", "warn-tint", "warning"),
           "error": ("Problem", "problem", "problem-tint", "problem"),
@@ -79,9 +81,11 @@ FILTERS = [
     ("all", "All items", None, lambda it: True),
     ("games", "Games", "game", lambda it: bool(it.game)),
     ("music", "Music", "music", lambda it: it.music > 0),
+    ("utils", "Utilities", "tool", lambda it: bool(it.utility)),
     ("problems", "Problems", "problem", lambda it: it.status == "error"),
     ("warnings", "Warnings", "warning", lambda it: it.status == "warning"),
     ("dups", "Duplicates", "duplicate", lambda it: it.copies > 1),
+    ("sets", "Sets to complete", "disk", lambda it: it.set_problem),
     ("whd", "WHDLoad games", "game", lambda it: it.type == "WHDLoad"),
     ("nondos", "Non-DOS disks", "disk", lambda it: it.non_dos),
     ("hd", "Hard drives", "harddrive", lambda it: it.hard_drive),
@@ -181,7 +185,16 @@ class Item:
     copies: int = 1             # how many copies of this disk there are
     spare_of: int = 0           # a spare copy: the id of the copy TurboCAT keeps (and shows)
     spares: tuple = ()          # the copy kept: ids of its hidden spares
+    version_key: str = ""       # the title without TOSEC tags: versions of a disk share it
+    versions: int = 1           # how many versions of this disk there are
+    version_of: int = 0         # another version: the id of the version shown instead
+    other_versions: tuple = ()  # the version shown: ids of the others
     shares: frozenset = frozenset()   # fingerprints of archives/disks it shares with other items
+    members: tuple = ()         # a disk set's row: ids of its disks, in disk order
+    set_badge: str = ""         # a disk set's row: "Complete · 3 of 3", "Disk 2 missing"...
+    set_tone: str = ""          # ok, warn or problem
+    set_problem: bool = False   # a set with missing or damaged disks
+    dset: object = None         # the sets.DiskSet behind a set's row
     non_dos: bool = False
     hard_drive: bool = False
     thumb_icon: str = ""        # the disk's own Workbench icon (PNG path)
@@ -189,6 +202,11 @@ class Item:
     pic_from: str = ""
     pic_origin: str = ""
     game: str = ""              # why it counts as a game ("" if it doesn't)
+    utility: str = ""           # why it counts as a utility or application ("" if it doesn't)
+    verified: tuple = ()        # ("match" or "differs", collection list title) if a list knows it
+    tosec_name: str = ""        # the disk's proper name, found by its checksum ("" if unknown)
+    identified_by: str = ""     # the list that knew it
+    name_guess: str = ""        # a guess from the folder, for a file called "Disk1.adf"
     key: str = ""               # pictures / music key
     music: int = 0              # music modules found inside
     search_blob: str = field(default="", repr=False)
@@ -199,11 +217,19 @@ def load_items(cat):
     shared_sha = {r["sha1"] for r in cat.duplicate_images()}
     thumbs = pictures.thumbs_by_key(cat)
     game_why = games.classify(cat)
+    lists = datlists.lists_in({os.path.dirname(m["source"]) for m in rows})
     tunes = {k: len(v) for k, v in pictures.music_by_key(cat).items()}
     top = cat.top_ids()
     inside = {}      # top-level id -> every archive / image found inside it
     for r in cat.db.execute("SELECT * FROM media WHERE parent_id IS NOT NULL ORDER BY id"):
         inside.setdefault(top.get(r["id"]), []).append(r)
+    known = identify.identify({m["id"]: [m] + inside.get(m["id"], []) for m in rows}, lists)
+    for mid, (name, _) in known.items():           # an identified disk by a games publisher
+        if mid not in game_why:
+            pub = games._publisher(name)
+            if pub:
+                game_why[mid] = f"identified as a {pub} disk by its checksum ({pub} published games)"
+    util_why = utilities.classify(cat, rows, game_why, lists, cat.scan_roots())
     rank = {"error": 3, "warning": 2}
     items = []
     for m in rows:
@@ -245,6 +271,9 @@ def load_items(cat):
             from_text = bool(title)
             if not title:
                 title = "Non-DOS data disk" if non_dos or not disk["fs"] else "No volume name"
+        if m["id"] in known and (from_text or not (disk["volume"] or m["whd_name"])):
+            # Text found on the disk (or nothing) is a poor title next to the disk's real name.
+            title, from_text = pictures.clean_title(known[m["id"]][0]), False
 
         if disk is m:
             n = (m["file_count"] or 0) + sum(k["file_count"] or 0 for k in kids)
@@ -269,10 +298,57 @@ def load_items(cat):
             pic=pictures.picture_path(th["pic"]) or "" if th else "",
             pic_from=(th["pic_from"] or "") if th else "",
             pic_origin=(th["origin"] or "") if th else "",
-            game=game_why.get(m["id"], ""),
+            game=game_why.get(m["id"], ""), utility=util_why.get(m["id"], ""),
+            verified=_verified(m, kids, lists),
+            tosec_name=identify.stem(known[m["id"]][0]) if m["id"] in known else "",
+            identified_by=known[m["id"]][1] if m["id"] in known else "",
+            name_guess="" if m["id"] in known else identify.guess(m["source"]),
             key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0)))
     dupes.mark(items, cat)
+    vers.mark(items, cat)
     return items
+
+
+def _verified(m, kids, lists):
+    """("match"/"differs", list title) if a collection list beside the item knows it."""
+    if not lists:
+        return ()
+    shas = {(r["sha1"] or "").lower() for r in [m] + kids if r["sha1"]}
+    verdict, lst = datlists.check(os.path.basename(m["source"]), os.path.dirname(m["source"]), shas, lists)
+    return (verdict, lst.title) if verdict else ()
+
+
+def make_set_items(items):
+    """One row per multi-disk set, built from its disks (spare copies left out).
+    Returns (set rows, {disk id: its set's row}, {disk id: disk number})."""
+    rows, member_of, number_of = [], {}, {}
+    for ds in disksets.group([it for it in items if not it.spare_of],
+                             lambda it: (bool(it.version_of), vers.order(it))):
+        members = [it for _, it, _ in ds.disks]
+        first = members[0]
+        with_pic = next((m for m in members if m.pic), first)
+        with_icon = next((m for m in members if m.thumb_icon), first)
+        worst = max(members, key=lambda m: {"error": 3, "warning": 2}.get(m.status, 0))
+        files = sum(int(m.files.replace(",", "")) for m in members if m.files.replace(",", "").isdigit())
+        badge, tone = ds.badge()
+        have = len(members)
+        row = Item(
+            id=first.id, number=first.number, file=ds.key, path=first.path,
+            type=f"Set of {ds.expected} disks" + (f" · {have} here" if have != ds.expected else ""),
+            icon=first.icon, title=first.title, from_text=first.from_text,
+            files=f"{files:,}" if files else "—", status=worst.status, sha1="",
+            non_dos=all(m.non_dos for m in members), hard_drive=False,
+            thumb_icon=with_icon.thumb_icon, pic=with_pic.pic, pic_from=with_pic.pic_from,
+            pic_origin=with_pic.pic_origin, game=next((m.game for m in members if m.game), ""),
+            utility=next((m.utility for m in members if m.utility), ""),
+            key=first.key, music=sum(m.music for m in members),
+            members=tuple(m.id for m in members), set_badge=badge, set_tone=tone,
+            set_problem=not ds.complete, dset=ds)
+        rows.append(row)
+        for n, m, _ in ds.disks:
+            member_of[m.id] = row
+            number_of[m.id] = n
+    return rows, member_of, number_of
 
 
 # ---------------------------------------------------------------- table
@@ -316,12 +392,17 @@ class ItemModel(QAbstractTableModel):
             if col == 0:
                 return f"#{it.number:04d}"
             if col == 1:
-                return it.path if role == Qt.ItemDataRole.ToolTipRole else it.file
+                if role == Qt.ItemDataRole.ToolTipRole:
+                    return it.path + (f"\nIdentified as {it.tosec_name}" if it.tosec_name else "")
+                return _shown_name(it)
             if col == 2:
                 return it.title + (f"\nFound: {it.found}" if it.found else "")
             if col == 3:
                 return it.files
-            return STATUS.get(it.status, STATUS["ok"])[0] + _dup_word(it, long=True)
+            if it.members:
+                return it.set_badge
+            v = _version_word(it)
+            return STATUS.get(it.status, STATUS["ok"])[0] + _dup_word(it, long=True) + (f" · {v}" if v else "")
         return None
 
 
@@ -331,6 +412,29 @@ def _dup_word(it, long=False):
         return ""
     word = "Spare copy" if it.spare_of else f"{it.copies} copies"
     return f" · {word}" if long else word
+
+
+def _renamed(it):
+    """True when the disk is identified and its file is called something else."""
+    return bool(it.tosec_name) and not it.members and \
+        identify.stem(os.path.splitext(it.file)[0]) != it.tosec_name
+
+
+def _shown_name(it):
+    """The name in the list: the identified TOSEC name, else the file name."""
+    return it.tosec_name if _renamed(it) else it.file
+
+
+def _type_line(it):
+    """The small line under the name: the type, and the real file name when it differs."""
+    return f"{it.type} · file {it.file}" if _renamed(it) else it.type
+
+
+def _version_word(it):
+    """The versions pill: "4 versions" on the version shown, "Other version" on the rest."""
+    if it.versions < 2:
+        return ""
+    return "Other version" if it.version_of else f"{it.versions} versions"
 
 
 TUNE_COLUMNS = ["TUNE", "FORMAT", "SIZE", "LENGTH", "NO.", "WHERE"]
@@ -440,11 +544,12 @@ class RowDelegate(QStyledItemDelegate):
             p.setFont(f1)
             p.setPen(C["ink"])
             p.drawText(QRectF(tx, y, tw, QFontMetrics(f1).height()), Qt.AlignmentFlag.AlignLeft,
-                       QFontMetrics(f1).elidedText(it.file, Qt.TextElideMode.ElideMiddle, int(tw)))
+                       QFontMetrics(f1).elidedText(_shown_name(it), Qt.TextElideMode.ElideMiddle, int(tw)))
             p.setFont(f2)
             p.setPen(C["ink-muted"])
             p.drawText(QRectF(tx, y + QFontMetrics(f1).height(), tw, QFontMetrics(f2).height()),
-                       Qt.AlignmentFlag.AlignLeft, it.type)
+                       Qt.AlignmentFlag.AlignLeft,
+                       QFontMetrics(f2).elidedText(_type_line(it), Qt.TextElideMode.ElideMiddle, int(tw)))
         elif col == 2:
             f1 = ui_font(14, italic=it.from_text)
             fs = ui_font(12)
@@ -474,11 +579,16 @@ class RowDelegate(QStyledItemDelegate):
             p.setPen(C["ink"])
             p.drawText(QRectF(x, r.top(), w, r.height()),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, it.files)
+        elif it.members:
+            fg, bg, ico = SET_TONE[it.set_tone]
+            self._pill(p, x, r, it.set_badge, C[fg], C[bg], ico)
         else:
             word, fg, bg, ico = STATUS.get(it.status, STATUS["ok"])
             px = self._pill(p, x, r, word, C[fg], C[bg], ico)
             if it.copies > 1:
-                self._pill(p, px + 6, r, _dup_word(it), C["ink-soft"], C["neutral-tint"], "duplicate")
+                px = self._pill(p, px + 6, r, _dup_word(it), C["ink-soft"], C["neutral-tint"], "duplicate")
+            if it.versions > 1:
+                self._pill(p, px + 6, r, _version_word(it), C["ink-soft"], C["neutral-tint"], None)
         p.restore()
 
     def _pill(self, p, x, r, text, fg, bg, ico):
@@ -541,7 +651,8 @@ class RowDelegate(QStyledItemDelegate):
             elif col == 3:
                 w = QFontMetrics(data_font(13)).horizontalAdvance(it.files)
             else:
-                w = 120 + (130 if it.copies > 1 else 0)
+                w = (QFontMetrics(ui_font(12, QFont.Weight.DemiBold)).horizontalAdvance(it.set_badge) + 44
+                     if it.members else 120 + (130 if it.copies > 1 else 0) + (120 if it.versions > 1 else 0))
         return QSize(w + 2 * self.PAD + 4, 56)
 
 
@@ -732,6 +843,7 @@ class DetailsPanel(QFrame):
         self.cat = cat
         self.on_select_number = on_select_number
         self.on_keep = None          # keep this copy of a duplicate (set by the window)
+        self.on_version = None       # show this version of a disk (set by the window)
         self.source = None
         self.item_id = None
         self.setObjectName("details")
@@ -906,12 +1018,116 @@ class DetailsPanel(QFrame):
         else:
             pic.hide()
 
+    def _disk_files(self, media_id):
+        """{path: sha1} of the files on an item's disk (the one disk inside an archive)."""
+        kids = self.cat.db.execute("SELECT id, kind FROM media WHERE parent_id=?", (media_id,)).fetchall()
+        mid = kids[0]["id"] if len(kids) == 1 and kids[0]["kind"] in DISK_KINDS else media_id
+        # AmigaDOS names ignore case: S/Startup-Sequence and S/startup-sequence are one file.
+        return {f["path"].lower(): (f["path"], f["sha1"]) for f in self.cat.db.execute(
+            "SELECT path, sha1 FROM files WHERE media_id=? AND is_dir=0", (mid,))}
+
+    def _difference(self, a, b):
+        """How disk b's files differ from disk a's, in a few words."""
+        fa, fb = self._disk_files(a), self._disk_files(b)
+        if not fa and not fb:
+            return "no files to compare"
+        if {k: v[1] for k, v in fa.items()} == {k: v[1] for k, v in fb.items()}:
+            return "same files"
+        changed = sorted(fb[p][0] for p in fa.keys() & fb.keys() if fa[p][1] != fb[p][1])
+        extra = sorted(fb[p][0] for p in fb.keys() - fa.keys())
+        gone = sorted(fa[p][0] for p in fa.keys() - fb.keys())
+        bits = []
+        if changed:
+            bits.append("changed " + ", ".join(changed[:3]) + (f" +{len(changed) - 3}" if len(changed) > 3 else ""))
+        if extra:
+            bits.append("extra " + ", ".join(extra[:3]) + (f" +{len(extra) - 3}" if len(extra) > 3 else ""))
+        if gone:
+            bits.append("without " + ", ".join(gone[:3]) + (f" +{len(gone) - 3}" if len(gone) > 3 else ""))
+        return "files differ: " + "; ".join(bits)
+
+    def _versions_note(self, item):
+        """Versions of one disk: which is shown, what the others are, how they differ."""
+        acc = C["accent"].name()
+
+        def what(path):
+            t = vers.tags(path)
+            return "; ".join(_esc(vers.describe(x)) for x in t) if t else "the standard version, no tags"
+
+        def link(row):
+            return f"<a href='{row['number']}' style='color:{acc}'>#{row['number']:04d}</a>"
+
+        if item.version_of:
+            shown = self.cat.media_by_id(item.version_of)
+            if shown is None:
+                return Note("neutral", None, "")
+            return Note(
+                "neutral", "duplicate",
+                f"<b>Another version</b> of {link(shown)} {_esc(os.path.basename(shown['source']))}.<br>"
+                f"This one: {what(item.path)} · {self._difference(shown['id'], item.id)}.<br>"
+                f"With grouping on, TurboCAT shows #{shown['number']:04d} and hides this one (nothing is "
+                f"deleted). <a href='version:{item.id}' style='color:{acc}'>Show this version instead</a>",
+                on_link=self._note_link)
+        lines = []
+        for vid in item.other_versions[:8]:
+            r = self.cat.media_by_id(vid)
+            if r is None:
+                continue
+            lines.append(f"{link(r)} {what(r['source'])} · {self._difference(item.id, vid)} · "
+                         f"<a href='version:{vid}' style='color:{acc}'>show this one instead</a>")
+        more = f"<br>and {len(item.other_versions) - 8} more" if len(item.other_versions) > 8 else ""
+        return Note(
+            "accent", "duplicate",
+            f"<b>{item.versions} versions of this disk.</b> TurboCAT shows this one ({what(item.path)}) and "
+            f"hides the others while grouping is on (nothing is deleted):<br>" + "<br>".join(lines) + more,
+            on_link=self._note_link)
+
+    def _set_note(self, item):
+        """A disk set: its disks in order, with gaps, problems and other versions."""
+        ds, acc = item.dset, C["accent"].name()
+        tone = {"ok": "accent", "warn": "warn", "problem": "problem"}[item.set_tone]
+        folders = {os.path.dirname(it.path) for _, it, _ in ds.disks}
+        home = os.path.expanduser("~")
+
+        def link(it):
+            where = (f" <span style='color:{C['ink-muted'].name()}'>in "
+                     f"{_esc(os.path.dirname(it.path).replace(home, '~'))}</span>") if len(folders) > 1 else ""
+            bad = " — <b>has problems</b>" if it.status == "error" else ""
+            rest = it.file[len(ds.key):].strip() if it.file.startswith(ds.key) else it.file
+            return (f"<a href='{it.number}' style='color:{acc}'>#{it.number:04d}</a> "
+                    f"{_esc(rest)}{bad}{where}")
+
+        have = {n: (it, others) for n, it, others in ds.disks}
+        lines = []
+        for n in range(1, ds.expected + 1):
+            if n in have:
+                it, others = have[n]
+                line = f"Disk {n}: {link(it)}"
+                if others:
+                    line += f"<br>&nbsp;&nbsp;&nbsp;other version{'s' if len(others) > 1 else ''}: " + \
+                            ", ".join(link(o) for o in others[:3])
+            else:
+                line = f"Disk {n}: <b>missing</b>"
+            lines.append(line)
+        if ds.complete:
+            head = f"<b>Complete set of {ds.expected} disks.</b> Play starts them all, disk 1 first."
+        else:
+            need = ds.missing + ds.problem_disks
+            head = (f"<b>Incomplete set:</b> {len(ds.disks)} of {ds.expected} disks here"
+                    + (f", needs disk{'s' if len(need) > 1 else ''} {', '.join(map(str, sorted(need)))}"
+                       if need else "") + ".")
+        flags = "".join(f"<br><i>{_esc(_cap(f))}</i>" for f in ds.flags)
+        return Note(tone, "disk", f"{head}{flags}<br>" + "<br>".join(lines), on_link=self._note_link)
+
     def _note_link(self, href):
         """Links in notes: an item number to jump to, or keep:<id> to keep that copy."""
         if href.startswith("keep:"):
             m = self.cat.media_by_id(int(href[5:]))
             if m is not None and self.on_keep:
                 self.on_keep(m)
+        elif href.startswith("version:"):
+            m = self.cat.media_by_id(int(href[8:]))
+            if m is not None and self.on_version:
+                self.on_version(m)
         else:
             self.on_select_number(int(href))
 
@@ -1012,6 +1228,8 @@ class DetailsPanel(QFrame):
                 w.hide()
                 w.setParent(None)
                 w.deleteLater()
+        if item.members:
+            self.notes.addWidget(self._set_note(item))
         if d["status"] == "empty":
             if not d["size"]:
                 self.notes.addWidget(Note(
@@ -1056,6 +1274,8 @@ class DetailsPanel(QFrame):
                 f"<b>{item.copies} copies of this disk.</b> TurboCAT shows this one and hides the "
                 f"spare{'s' if len(rows) != 1 else ''} (nothing is deleted):<br>{spares}{more}",
                 on_link=self._note_link))
+        if item.versions > 1:
+            self.notes.addWidget(self._versions_note(item))
         if item.shares:
             own = {m["id"]} | {k["id"] for k in kids}
             mine = {k["sha1"]: k for k in kids if k["sha1"] in item.shares}
@@ -1072,6 +1292,41 @@ class DetailsPanel(QFrame):
                     + "<br>".join(lines), on_link=self._note_link))
         if item.game and not m["whd_name"]:
             self.notes.addWidget(Note("neutral", "game", f"<b>Game</b> — {_esc(item.game)}"))
+        if item.tosec_name and not item.members:
+            t = vers.tags(item.tosec_name)
+            meaning = ("<br>" + "; ".join(f"[{_esc(x)}] {_esc(vers.describe(x))}" for x in t)) if t else ""
+            same = not _renamed(item)
+            self.notes.addWidget(Note(
+                "accent", "ok",
+                f"<b>Identified by its checksum:</b> {_esc(item.tosec_name)}{meaning}<br>"
+                f"From {_esc(item.identified_by)}." + ("" if same else
+                f" The file is called {_esc(item.file)}; Tools › Rename files to their proper names… "
+                "can rename it (it asks first).")))
+        elif not item.members and not identify.have_list() and \
+                identify.GENERIC_FILE.match(os.path.splitext(item.file)[0].strip()):
+            self.notes.addWidget(Note(
+                "accent", None,
+                f"<b>What is {_esc(item.file)}?</b> Its name doesn't say. TurboCAT can find a disk's "
+                "proper name from its checksum: choose <b>Tools › Identify disks online…</b> (it asks "
+                "before downloading the list of Amiga disks; your files aren't renamed)."
+                + (f"<br>Possibly {_esc(item.name_guess)}, going by the folder it is in." if item.name_guess else "")))
+        elif item.name_guess:
+            self.notes.addWidget(Note(
+                "neutral", None,
+                f"<b>Possibly {_esc(item.name_guess)}</b> — a guess from the folder it is in; the file "
+                f"name and the disk itself don't say. Tools › Identify disks online… can check it "
+                "against the TOSEC list of Amiga disks."))
+        if item.utility:
+            self.notes.addWidget(Note("neutral", "tool", f"<b>Utility</b> — {_esc(item.utility)}"))
+        if item.verified and item.verified[0] == "match":
+            self.notes.addWidget(Note(
+                "accent", "ok", f"<b>Verified</b> — exactly the file listed in {_esc(item.verified[1])}: "
+                "complete and undamaged."))
+        elif item.verified:
+            self.notes.addWidget(Note(
+                "warn", "warning", f"<b>Doesn't match the collection list</b> — {_esc(item.verified[1])} "
+                "lists a file of this name with different contents. This copy may be damaged, "
+                "or a different version."))
         if m["whd_name"]:
             lines = [x for x in (m["whd_copy"], m["whd_info"]) if x]
             self.notes.addWidget(Note("accent", "game", f"<b>WHDLoad game:</b> {_esc(m['whd_name'])}",
@@ -1436,7 +1691,7 @@ class PlayerBar(QFrame):
         ok, why = music.available()
         self.show()
         if not ok:
-            self.what.setText(f"Can't play music: {why}")
+            self.what.setText(f"Can't play music: {why} · Help › Check setup")
             self.time.setText("")
             return
         self.playlist, self.index, self.label = list(rows), index, label
@@ -1541,14 +1796,27 @@ class PictureWorker(QThread):
                 except Exception:
                     return ""
 
-            res = {"disk": pictures.build(
-                cat, lambda i, n, m: self.progress.emit("disk", i, n, name(m)), stop)}
+            res = {}
+            # The TOSEC list of Amiga disks, if the user agreed to it (once, then every two months).
+            if cat.get_meta(identify.CONSENT, False) and (not identify.have_list() or identify.list_is_old()):
+                try:
+                    self.progress.emit("identify", 0, 0, "")
+                    identify.download(stop, lambda d, t: self.progress.emit("identify", d // 1024, t // 1024, ""))
+                    res["identify_fetched"] = True
+                except pictures.Stopped:
+                    pass
+                except Exception as ex:
+                    res["identify_error"] = str(ex)
+            known = {k: v[0] for k, v in identify.for_catalogue(cat).items()}
+            res["identified"] = len(known)
+            res["disk"] = pictures.build(
+                cat, lambda i, n, m: self.progress.emit("disk", i, n, name(m)), stop)
             if not self.stop_wanted:
                 res["lengths"] = pictures.measure_music(
                     cat, lambda i, n, m: self.progress.emit("lengths", i, n, ""), stop)
             if self.online and not self.stop_wanted:
                 res["online"] = pictures.lookup_online(
-                    cat, lambda i, n, m: self.progress.emit("online", i, n, name(m)), stop)
+                    cat, lambda i, n, m: self.progress.emit("online", i, n, name(m)), stop, known=known)
             if not self.stop_wanted:          # keep the Amiga's copy of the catalogue up to date
                 try:
                     folder = cat.get_meta("turboview_dir") or turboview.default_folder()
@@ -1668,7 +1936,7 @@ class PlayDialog(QDialog):
         rom = self.roms.get(mdl)
         self.rom_note.setText(f"Kickstart: {rom}" if rom else
                               "No matching Kickstart ROM found; the emulator will use its own "
-                              "choice (or AROS).")
+                              "choice (or AROS). Help › Check setup says where to get one.")
 
     def start(self):
         emu = self.emu_box.currentData()
@@ -1961,6 +2229,207 @@ class GotekDialog(QDialog):
         super().reject()
 
 
+class SetupDialog(QDialog):
+    """Help > Check setup: each part TurboCAT uses, whether it is here, and how to get it."""
+
+    ICON = {setupcheck.OK: "ok", setupcheck.PARTIAL: "warning", setupcheck.MISSING: "problem"}
+
+    def __init__(self, parent, on_identify=None):
+        super().__init__(parent)
+        self.on_identify = on_identify
+        self.setObjectName("dialog")
+        self.setWindowTitle("Check setup")
+        self.setMinimumSize(760, 620)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 22, 24, 20)
+        v.setSpacing(10)
+        self.head = QLabel()
+        self.head.setFont(ui_font(20, QFont.Weight.Bold))
+        v.addWidget(self.head)
+        self.sub = _wrap_label("", ui_font(13), "muted")
+        v.addWidget(self.sub)
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.Shape.NoFrame)
+        v.addWidget(self.area, 1)
+        buttons = QHBoxLayout()
+        again = QPushButton("Check again")
+        again.setToolTip("Look again, e.g. after installing something")
+        again.clicked.connect(self.fill)
+        close = QPushButton("Close")
+        close.setObjectName("primary")
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        for b in (again, close):
+            b.setFont(ui_font(13, QFont.Weight.DemiBold))
+        buttons.addWidget(again)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        v.addLayout(buttons)
+        self.fill()
+
+    def fill(self):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.checks = setupcheck.run()
+        finally:
+            QApplication.restoreOverrideCursor()
+        headline, _ = setupcheck.summary(self.checks)
+        self.head.setText(headline)
+        self.sub.setText(f"On this computer ({setupcheck.platform_name()}). Parts marked ✗ are missing; "
+                         "each says what doesn't work without it and how to get it.")
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(0, 4, 8, 4)
+        lay.setSpacing(8)
+        for c in self.checks:
+            lay.addWidget(self._row(c))
+        lay.addStretch(1)
+        self.area.setWidget(body)
+
+    def _row(self, c):
+        box = QFrame()
+        box.setObjectName("note_neutral" if c.status == setupcheck.OK else
+                          ("note_warn" if c.status == setupcheck.PARTIAL or not c.important else "note_problem"))
+        h = QHBoxLayout(box)
+        h.setContentsMargins(12, 10, 12, 10)
+        h.setSpacing(10)
+        pic = QLabel()
+        pic.setPixmap(icon(self.ICON[c.status] if c.important or c.status == setupcheck.OK else "warning", 20))
+        pic.setFixedSize(20, 20)
+        h.addWidget(pic, 0, Qt.AlignmentFlag.AlignTop)
+        col = QVBoxLayout()
+        col.setSpacing(3)
+        title = _wrap_label(f"<b>{_esc(c.name)}</b> — {_esc(c.purpose)}", ui_font(13))
+        title.setTextFormat(Qt.TextFormat.RichText)
+        col.addWidget(title)
+        if c.detail:
+            col.addWidget(_wrap_label(("Found: " if c.status == setupcheck.OK else "") + c.detail, ui_font(12)))
+        if c.status != setupcheck.OK:
+            if c.without:
+                col.addWidget(_wrap_label(f"Without it: {c.without}.", ui_font(12)))
+            if c.advice:
+                col.addWidget(_wrap_label(c.advice, ui_font(12)))
+            actions = QHBoxLayout()
+            actions.setSpacing(8)
+            if c.command:
+                cmd = QLineEdit(c.command)
+                cmd.setReadOnly(True)
+                cmd.setFont(data_font(12))
+                cmd.setCursorPosition(0)
+                copy = QPushButton("Copy")
+                copy.setObjectName("small")
+                copy.setToolTip("Copy the command, then paste it into a terminal")
+                copy.clicked.connect(lambda _=False, t=c.command, b=copy: (
+                    QGuiApplication.clipboard().setText(t), b.setText("Copied")))
+                actions.addWidget(cmd, 1)
+                actions.addWidget(copy)
+            if c.url:
+                web = QPushButton("Open website")
+                web.setObjectName("small")
+                web.setToolTip(c.url)
+                web.clicked.connect(lambda _=False, u=c.url: QDesktopServices.openUrl(QUrl(u)))
+                actions.addWidget(web)
+            if "identify" in c.tags and self.on_identify:
+                go = QPushButton("Identify disks online…")
+                go.setObjectName("small")
+                go.clicked.connect(lambda: (self.accept(), self.on_identify()))
+                actions.addWidget(go)
+            if not c.command:
+                actions.addStretch(1)
+            if actions.count():
+                col.addLayout(actions)
+        h.addLayout(col, 1)
+        return box
+
+
+class RenameDialog(QDialog):
+    """Show the files that would be renamed to their TOSEC names; rename the ticked ones."""
+
+    LOG = os.path.expanduser("~/.local/share/turbocat/renames.csv")
+
+    def __init__(self, parent, plan):
+        super().__init__(parent)
+        self.plan = plan
+        self.setObjectName("dialog")
+        self.setWindowTitle("Rename files to their proper names")
+        self.setMinimumSize(820, 460)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 22, 24, 20)
+        v.setSpacing(12)
+        head = QLabel(f"Rename {_n(len(plan), 'file')} to {'their' if len(plan) > 1 else 'its'} TOSEC "
+                      "name?")
+        head.setFont(ui_font(18, QFont.Weight.Bold))
+        v.addWidget(head)
+        v.addWidget(_wrap_label(
+            "These disks were identified by their checksums. Only the names change: the files stay "
+            "in their folders, their contents are untouched, and TurboCAT's catalogue follows them. "
+            "Untick any you want to keep as they are. Files in a synced folder (such as Dropbox) "
+            f"are renamed there too. A list of every rename is kept in {self.LOG}.",
+            ui_font(13), "muted"))
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Now", "Will be"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setFont(ui_font(12))
+        for it, old, new in plan:
+            row = QTreeWidgetItem([os.path.basename(old), os.path.basename(new)])
+            row.setCheckState(0, Qt.CheckState.Checked)
+            row.setToolTip(0, old)
+            row.setToolTip(1, new)
+            self.tree.addTopLevelItem(row)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.tree.setColumnWidth(0, 260)
+        v.addWidget(self.tree, 1)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Rename")
+        ok.setObjectName("primary")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        for b in (cancel, ok):
+            b.setFont(ui_font(13, QFont.Weight.DemiBold))
+            buttons.addWidget(b)
+        v.addLayout(buttons)
+
+    def apply(self, cat):
+        """Rename the ticked files and update the catalogue. Returns (renamed, failed)."""
+        import csv
+        done = failed = 0
+        moved = {}
+        for i, (it, old, new) in enumerate(self.plan):
+            if self.tree.topLevelItem(i).checkState(0) != Qt.CheckState.Checked:
+                continue
+            if os.path.exists(new):
+                failed += 1
+                continue
+            try:
+                os.rename(old, new)
+            except OSError:
+                failed += 1
+                continue
+            cat.db.execute("UPDATE media SET source=? WHERE source=?", (new, old))
+            moved[old] = new
+            done += 1
+        cat.db.commit()
+        # Choices remembered by path (which copy or version to show) follow the files.
+        for key in (dupes.CHOICES, vers.CHOICES):
+            c = cat.get_meta(key, {}) or {}
+            if any(p in moved for p in c.values()):
+                cat.set_meta(key, {k: moved.get(p, p) for k, p in c.items()})
+        if moved:
+            os.makedirs(os.path.dirname(self.LOG), exist_ok=True)
+            new_log = not os.path.exists(self.LOG)
+            with open(self.LOG, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if new_log:
+                    w.writerow(["When", "Old name", "New name"])
+                for old, new in moved.items():
+                    w.writerow([time.strftime("%Y-%m-%d %H:%M"), old, new])
+        return done, failed
+
+
 class AboutDialog(QDialog):
     """About TurboCAT 4: version, the catalogue in use and its safety copies, what it is built on."""
 
@@ -2093,6 +2562,8 @@ class MainWindow(QMainWindow):
         self.db_path = db_path
         self.cat = Catalogue(db_path)
         self.all_items = load_items(self.cat)
+        self.group_sets = bool(self.cat.get_meta("group_sets", True))
+        self._make_sets()
         self.setWindowTitle(f"{APP_NAME} — {os.path.basename(db_path)}")
         self.setWindowIcon(QIcon(icon("mark", 64)))
         self.resize(1280, 860)
@@ -2215,6 +2686,18 @@ class MainWindow(QMainWindow):
         res_row = QHBoxLayout()
         res_row.setSpacing(8)
         res_row.addWidget(self.result_label, 1)
+        self.group_btn = QPushButton("Group sets and versions")
+        self.group_btn.setObjectName("segment")
+        self.group_btn.setCheckable(True)
+        self.group_btn.setChecked(self.group_sets)
+        self.group_btn.setFont(ui_font(12, QFont.Weight.DemiBold))
+        self.group_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.group_btn.setToolTip("On: each multi-disk game or program is one row, showing whether the "
+                                  "set is complete, and each disk shows one of its versions (TOSEC [h], "
+                                  "[m], [o]... variants are hidden). Off: every disk and version on its own row.")
+        self.group_btn.toggled.connect(self.set_grouping)
+        res_row.addWidget(self.group_btn)
+        res_row.addSpacing(8)
         self.view_disks = QPushButton("Disks")
         self.view_tunes = QPushButton("Tunes")
         self.view_group = QButtonGroup(self)
@@ -2324,6 +2807,7 @@ class MainWindow(QMainWindow):
         self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek, self.find_online,
                                     self.play_music, self.play_in_emulator)
         self.details.on_keep = self.keep_copy
+        self.details.on_version = self.show_version
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("split")
         split.setHandleWidth(20)
@@ -2369,11 +2853,16 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self.search.edit, activated=self.search.edit.clear)
         self.table.doubleClicked.connect(lambda _i: self.play_selected())
         self._build_menus()
+        QTimer.singleShot(1500, self._setup_on_start)
         self.emulators = None
         self.worker = None
         self.bar_mode = "scan"
         self.pic_asked = self.pic_shown = False
         self.spares_hidden = 0
+        self.versions_hidden = 0
+        self.closing = False
+        self.close_timer = QTimer(self, singleShot=True, interval=15000)
+        self.close_timer.timeout.connect(self._close_slow)
         self.hide_bar = QTimer(self, singleShot=True, interval=10000)
         self.hide_bar.timeout.connect(self.scan_bar.hide)
         self.live = QTimer(self, interval=4000)      # show new items while a scan runs
@@ -2428,6 +2917,8 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         add(m, "&Export tune list…", self.export_tune_list, None,
             "Save every tune found as a spreadsheet")
+        add(m, "Export &sets to complete…", self.export_sets, None,
+            "Save the disk sets with missing or damaged disks, and what each needs, as a spreadsheet")
         m.addSeparator()
         add(m, "&Quit", self.close, "Ctrl+Q")
 
@@ -2441,10 +2932,17 @@ class MainWindow(QMainWindow):
         m = bar.addMenu("&Tools")
         self.act_online = add(m, "Find pictures &online", self.find_online, None,
                               "Look up title screens in the libretro-thumbnails collection")
+        self.act_identify = add(m, "&Identify disks online…", self.identify_online, None,
+                                "Find each disk's proper name from its checksum, in the TOSEC list of Amiga disks")
+        add(m, "&Rename files to their proper names…", self.rename_to_tosec, None,
+            "Rename identified disks' files to their TOSEC names (shows the list first)")
         add(m, "Start &TurboView", self.start_turboview, None,
             "Start an emulated Amiga with TurboView and your collection mounted")
 
         m = bar.addMenu("&Help")
+        add(m, "&Check setup…", self.check_setup, None,
+            "What TurboCAT uses (emulator, Kickstart ROMs, music players…), what's missing and how to get it")
+        m.addSeparator()
         add(m, f"&About {APP_NAME}", self.show_about, "F1")
         add(m, f"{APP_NAME} on &GitHub", lambda: QDesktopServices.openUrl(QUrl(AboutDialog.REPO)))
         self._selection_changed()
@@ -2476,6 +2974,76 @@ class MainWindow(QMainWindow):
             for a in (self.act_play, self.act_gotek, self.act_folder):
                 a.setEnabled(bool(ids))
 
+    def _make_sets(self):
+        self.set_rows, self.member_of, self.disk_no = make_set_items(self.all_items)
+
+    def _grouped(self, shown, text):
+        """Replace the disks of each multi-disk set with the set's own row (where its first
+        listed disk was). A search hit on any disk brings in the set."""
+        out, seen = [], set()
+        for it in shown:
+            row = self.member_of.get(it.id)
+            if row is None:
+                out.append(it)
+                continue
+            if row.id in seen:
+                continue
+            seen.add(row.id)
+            row.found = (f"disk {self.disk_no[it.id]}: {it.found}" if text and it.found else "")
+            out.append(row)
+        return out
+
+    def set_grouping(self, on):
+        self.group_sets = bool(on)
+        self.cat.set_meta("group_sets", self.group_sets)
+        if self.group_btn.isChecked() != self.group_sets:
+            self.group_btn.setChecked(self.group_sets)
+        self.run_search()
+
+    def _expand(self, ids):
+        """Selected rows -> catalogue ids: a disk set's row stands for all its disks."""
+        rows = {it.id: it for it in self.model.items}
+        out = []
+        for i in ids:
+            it = rows.get(i)
+            out += list(it.members) if it is not None and it.members else [i]
+        return out
+
+    def export_sets(self):
+        """File > Export sets to complete: each incomplete set and the disks it needs."""
+        todo = [r for r in self.set_rows if r.set_problem]
+        if not todo:
+            QMessageBox.information(self, "Sets to complete", "Every disk set is complete.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save the list of sets to complete",
+                                              os.path.expanduser("~/TurboCAT sets to complete.csv"),
+                                              "Spreadsheet (*.csv)")
+        if not path:
+            return
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["Set", "Disks in set", "Disks you have", "Missing", "Damaged", "Notes", "Folder"])
+            for r in todo:
+                ds = r.dset
+                w.writerow([ds.key, ds.expected, ", ".join(str(n) for n, _, _ in ds.disks),
+                            ", ".join(map(str, ds.missing)), ", ".join(map(str, ds.problem_disks)),
+                            "; ".join(ds.flags), os.path.dirname(r.path)])
+        self.result_label.setText(f"Saved {_n(len(todo), 'set')} to complete to {path}")
+
+    def show_version(self, m):
+        """Show this version of a disk (the others are hidden while grouping is on)."""
+        it = next((x for x in self.all_items if x.id == m["id"]), None)
+        if it is None or not it.version_key:
+            return
+        vers.choose(self.cat, it.version_key, it.path)
+        self.reload()
+        if not self.group_sets:
+            self.set_grouping(True)
+        self.select_number(it.number)
+        self.result_label.setText(f"Showing #{it.number:04d} {it.file}; the other versions are hidden "
+                                  "while grouping is on (nothing is deleted)")
+
     def keep_copy(self, m):
         """Keep this copy of a duplicate disk: it is shown, the others become spares."""
         it = next((x for x in self.all_items if x.id == m["id"]), None)
@@ -2488,6 +3056,36 @@ class MainWindow(QMainWindow):
                                   f"cop{'y is' if it.copies == 2 else 'ies are'} now spare "
                                   f"(nothing is deleted)")
 
+    def _missing_emulator(self, title):
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText("No Amiga emulator was found.")
+        box.setInformativeText("TurboCAT starts disks in Amiberry or FS-UAE. Check setup shows how to "
+                               "install one on this computer.")
+        go = box.addButton("Check setup…", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.exec()
+        if box.clickedButton() is go:
+            self.check_setup()
+
+    def check_setup(self):
+        dlg = SetupDialog(self, on_identify=self.identify_online)
+        dlg.exec()
+        missing = sorted(c.name for c in dlg.checks if c.status != setupcheck.OK and c.important)
+        self.cat.set_meta("setup_seen", missing)
+        dlg.deleteLater()
+
+    def _setup_on_start(self):
+        """Once, if something important is missing (and again if what is missing changes)."""
+        try:
+            checks = setupcheck.run(music_versions=music.versions())
+        except Exception:
+            return
+        missing = sorted(c.name for c in checks if c.status != setupcheck.OK and c.important)
+        if missing and missing != self.cat.get_meta("setup_seen"):
+            self.check_setup()
+
     def show_about(self):
         dlg = AboutDialog(self, self.cat, self.db_path)
         dlg.exec()
@@ -2498,6 +3096,7 @@ class MainWindow(QMainWindow):
         the emulator."""
         ids = self.selected_ids()
         chosen = [it for it in self.model.items if it.id in set(ids)]
+        ids = self._expand(ids)
         if chosen and all(it.type == "Module" for it in chosen):
             rows, labels = [], []
             for it in chosen:
@@ -2517,9 +3116,7 @@ class MainWindow(QMainWindow):
         if self.emulators is None:
             self.emulators = emulator.find_emulators()
         if not self.emulators:
-            QMessageBox.information(self, "Play in emulator",
-                                    "Neither Amiberry nor FS-UAE was found. Install one of them "
-                                    "(Amiberry is on Flathub) and try again.")
+            self._missing_emulator("Play in emulator")
             return
         dlg = PlayDialog(self, self.cat, ids, self.emulators)
         dlg.exec()
@@ -2539,7 +3136,7 @@ class MainWindow(QMainWindow):
         if emu not in (self.emulators or {}):
             emu = next(iter(self.emulators or {}), None)
         if emu is None:
-            QMessageBox.information(self, "TurboView", "Neither Amiberry nor FS-UAE was found.")
+            self._missing_emulator("TurboView")
             return
         rom = emulator.find_kickstarts().get("A1200")
         cmd = emulator.turboview_command(emu, self.emulators[emu], rom, folder,
@@ -2551,7 +3148,7 @@ class MainWindow(QMainWindow):
         self.player_bar.play(rows, index, f"#{it.number:04d}" if it else "")
 
     def copy_to_gotek(self, ids=None):
-        ids = ids or self.selected_ids()
+        ids = ids or self._expand(self.selected_ids())
         if not ids:
             return
         GotekDialog(self, self.cat, self.db_path, ids).exec()
@@ -2567,6 +3164,10 @@ class MainWindow(QMainWindow):
                 if it.number == number:
                     self._select_row(row)
                     return
+            if self.group_sets and any(it.number == number for it in self.all_items
+                                       if it.id in self.member_of or it.version_of):
+                self.set_grouping(False)       # a disk of a set: show the disks one per row
+                continue
             # Not on show: clear the search and chips; a hidden spare copy is in Duplicates.
             self.filter = "all" if attempt == 0 else "dups"
             self.chips[self.filter][0].setChecked(True)
@@ -2731,29 +3332,78 @@ class MainWindow(QMainWindow):
         self.act_scan.setEnabled(True)
         self.rescan_btn.setEnabled(True)
         self.act_rescan.setEnabled(True)
-        self.find_pictures()
+        if not self.closing:
+            self.find_pictures()
 
     # -------------------------------------------------------------- pictures
     def find_pictures(self, online=None, asked=False):
         """Look for pictures on new items (and online, once the user has agreed to that).
         asked: the user asked for this, so the progress bar shows from the start."""
-        if self.pic_worker is not None or self.worker is not None:
+        if self.pic_worker is not None or self.worker is not None or self.closing:
             return
         if online is None:
             online = bool(self.cat.get_meta("online_pictures", False))
         self.pic_asked = asked
         self.pic_shown = False
         if asked:
-            self._pic_bar("Getting ready to look for pictures online…", 0, 0, "")
+            self._pic_bar("Getting ready…", 0, 0, "")
         self.pic_worker = PictureWorker(self.db_path, online)
         self.pic_worker.progress.connect(self._pic_progress)
         self.pic_worker.done.connect(self._pic_done)
         self.pic_worker.failed.connect(self._pic_failed)
         self.pic_worker.finished.connect(self._pic_finished)
+        self.pic_worker.finished.connect(self._pic_finished_then)
         self.online_btn.setEnabled(False)
         self.act_online.setEnabled(False)
         self.pic_worker.start()
         self.pic_refresh.start()
+
+    def identify_online(self):
+        """Tools > Identify disks online: download the TOSEC list once (asking first)."""
+        if not self.cat.get_meta(identify.CONSENT, False):
+            box = QMessageBox(self)
+            box.setWindowTitle("Identify disks online")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText("Identify disks by their checksums?")
+            box.setInformativeText(
+                "TurboCAT downloads the TOSEC catalogue of Amiga disks that libretro publishes on "
+                "GitHub (about 12 MB, once, refreshed every two months) and looks up each disk's "
+                "checksum in it. A disk called Disk1.adf can then show its proper name, such as "
+                "Superfrog (1993)(Team 17)(Disk 1 of 4).\n\nOnly the list is downloaded: nothing "
+                "about your disks is sent anywhere. Your files are not renamed.")
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            box.button(QMessageBox.StandardButton.Yes).setText("Download the list")
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                return
+            self.cat.set_meta(identify.CONSENT, True)
+        elif identify.have_list() and not identify.list_is_old():
+            self.reload()
+            n = sum(1 for it in self.all_items if it.tosec_name)
+            self.result_label.setText(f"{n:,} disks identified by their checksums (the list is up to date)")
+            return
+        if self.pic_worker is not None:          # after the search that is running now
+            self.identify_pending = True
+            return
+        self.find_pictures(asked=True)
+
+    def rename_to_tosec(self):
+        """Tools > Rename files to their proper names: show every rename, do them on request."""
+        plan = identify.rename_plan([it for it in self.all_items if not it.members])
+        if not plan:
+            QMessageBox.information(self, "Rename files", "There is nothing to rename: every identified "
+                                    "disk's file already has its proper name." if any(
+                                        it.tosec_name for it in self.all_items) else
+                                    "No disks have been identified yet. Tools › Identify disks online… "
+                                    "finds their proper names first.")
+            return
+        dlg = RenameDialog(self, plan)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        done, failed = dlg.apply(self.cat)
+        self.reload()
+        msg = f"Renamed {_n(done, 'file')}" + (f"; {failed} couldn't be renamed" if failed else "") + \
+              f" · the old and new names are listed in {RenameDialog.LOG}"
+        self.result_label.setText(msg)
 
     def find_online(self):
         if not self.cat.get_meta("online_pictures", False):
@@ -2806,6 +3456,11 @@ class MainWindow(QMainWindow):
         self.scan_bar.show()
 
     def _pic_progress(self, phase, i, n, what=""):
+        if phase == "identify":
+            size = f"{i / 1024:.1f} of {n / 1024:.1f} MB" if n else ""
+            self._pic_bar("Getting the TOSEC list of Amiga disks from GitHub…", i, n,
+                          size or "libretro-database, about 12 MB, once")
+            return
         if phase == "online" and not n:
             self._pic_bar("Getting the list of pictures from GitHub…", 0, 0,
                           "libretro-thumbnails, Commodore Amiga")
@@ -2826,6 +3481,10 @@ class MainWindow(QMainWindow):
         if res["disk"]["looked"]:
             bits.append(f"{res['disk']['found']:,} of {res['disk']['looked']:,} new items had pictures "
                         "or icons on the disk")
+        if res.get("identify_fetched"):
+            bits.append(f"{res['identified']:,} disks identified by their checksums")
+        if res.get("identify_error"):
+            bits.append(f"the TOSEC list couldn't be downloaded: {res['identify_error']}")
         if res.get("turboview_error"):
             bits.append(f"TurboView catalogue not written: {res['turboview_error']}")
         if "online" in res and res["online"]["looked"]:
@@ -2857,6 +3516,11 @@ class MainWindow(QMainWindow):
         if self.pic_shown:
             self._pic_bar_end(f"Finding pictures failed: {err}")
 
+    def _pic_finished_then(self):
+        if getattr(self, "identify_pending", False) and not self.closing:
+            self.identify_pending = False
+            QTimer.singleShot(0, lambda: self.find_pictures(asked=True))
+
     def _pic_finished(self):
         self.pic_worker = None
         self.pic_refresh.stop()
@@ -2867,6 +3531,7 @@ class MainWindow(QMainWindow):
         """Re-read the catalogue after a scan, keeping the search and selection."""
         before = {it.id: (it.pic, it.thumb_icon) for it in self.all_items}
         self.all_items = load_items(self.cat)
+        self._make_sets()
         if self.pic_worker is None:
             self._fill_counts()
         self.run_search()
@@ -2894,13 +3559,61 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(4, max(210, rest))
         self.widths_set = True
 
+    def _busy(self):
+        """What is still running in the background, in words (empty if nothing)."""
+        return " and ".join(w for w, t in (("the scan", self.worker), ("the picture search", self.pic_worker))
+                            if t is not None)
+
     def closeEvent(self, event):
+        """Close without freezing: ask background work to stop, show that TurboCAT is closing,
+        and close for real once it has (each item is saved as it is done, so nothing is lost)."""
+        self.closing = True
         self.player_bar.player.stop()
-        self.stop_pictures()
-        if self.worker is not None:
-            self.worker.stop_wanted = True
-            self.worker.wait(30000)
-        super().closeEvent(event)
+        busy = self._busy()
+        if not busy:
+            super().closeEvent(event)
+            return
+        event.ignore()
+        for t in (self.worker, self.pic_worker):
+            if t is not None:
+                t.stop_wanted = True
+                t.finished.connect(self._close_when_idle)
+        if not self.close_timer.isActive():
+            self.centralWidget().setEnabled(False)
+            self.menuBar().setEnabled(False)
+            self.bar_mode = "closing"
+            self.hide_bar.stop()
+            self.scan_busy.setRange(0, 0)
+            self.scan_text.setText(f"Closing: stopping {busy} first…")
+            self.scan_file.setText("")
+            self.stop_btn.hide()
+            self.scan_bar.show()
+            self.close_timer.start()
+
+    def _close_when_idle(self):
+        if self.closing and not self._busy():
+            self.close_timer.stop()
+            QTimer.singleShot(0, self.close)
+
+    def _close_slow(self):
+        """Still busy after a while (a huge disk image, a stalled download): offer to quit now."""
+        busy = self._busy()
+        if not busy:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(f"Closing {APP_NAME}")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"TurboCAT is still waiting for {busy} to stop.")
+        box.setInformativeText("Quit now? Everything catalogued so far is already saved; only the "
+                               "item being read at this moment would be looked at again next time.")
+        quit_btn = box.addButton("Quit now", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Keep waiting", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is quit_btn and self._busy():
+            sys.stdout.flush()
+            os._exit(0)            # the threads can't be stopped mid-read; SQLite keeps the data safe
+        elif self._busy():
+            self.close_timer.start()
 
     def _fill_counts(self):
         st = self.cat.stats()
@@ -2921,10 +3634,15 @@ class MainWindow(QMainWindow):
             shown = self.all_items
         else:
             hits = self.cat.search_items(text)
+            words = search_words(text)
             shown = []
             for it in self.all_items:
                 h = hits.get(it.id)
                 if h is None:
+                    # Disks identified by checksum are found by their proper name too.
+                    if it.tosec_name and matches(words, it.tosec_name):
+                        it.found = f"identified as {it.tosec_name}"
+                        shown.append(it)
                     continue
                 why = list(dict.fromkeys(h["why"]))
                 if h["files"]:
@@ -2939,6 +3657,14 @@ class MainWindow(QMainWindow):
         everything = shown
         shown = [it for it in shown if not it.spare_of or (text and it.spare_of not in found_ids)]
         self.spares_hidden = len(everything) - len(shown)
+        grouped = self.group_sets and self.filter != "dups"
+        self.versions_hidden = 0
+        if grouped:
+            # Other versions of a disk stay out of sight too (unless only they match a search).
+            before = len(shown)
+            shown = [it for it in shown if not it.version_of or (text and it.version_of not in found_ids)]
+            self.versions_hidden = before - len(shown)
+            shown = self._grouped(shown, text)
         self._fill_chips(shown, everything)
         matched = len(shown)
         test = FILTER_TEST[self.filter]
@@ -2961,6 +3687,10 @@ class MainWindow(QMainWindow):
         elif text:
             self.result_label.setText(
                 f"{len(shown):,} of {len(self.all_items):,} items match “{text}”")
+        elif self.filter == "sets":
+            self.result_label.setText(
+                f"{_n(len(shown), 'disk set')} with missing or damaged disks · "
+                "File › Export sets to complete… saves what each one needs")
         elif self.filter == "dups":
             sets = len({it.dup_key for it in shown})
             self.result_label.setText(
@@ -2969,14 +3699,20 @@ class MainWindow(QMainWindow):
         elif self.filter != "all":
             self.result_label.setText(f"{label} {len(shown):,} of {len(self.all_items):,} items")
         else:
+            n_sets = sum(1 for it in shown if it.members) if grouped else 0
             self.result_label.setText(f"All items {len(shown):,}" + (
+                f" · {_n(n_sets, 'disk set')} on one row each" if n_sets else "") + (
+                f" · {_n(self.versions_hidden, 'other version')} hidden" if self.versions_hidden else "") + (
                 f" · {_n(self.spares_hidden, 'spare copy')} hidden (see Duplicates)"
                 .replace("copys", "copies") if self.spares_hidden else ""))
         keep = set(self.selected_ids()) if self.model.items else set()
         self.model.set_items(shown)
         if shown:
             ids = [it.id for it in shown]
-            self._select_row(ids.index(self.current_id) if self.current_id in ids else 0)
+            cur = self.current_id
+            if grouped and cur in self.member_of:
+                cur = self.member_of[cur].id          # a disk of a set: select the set's row
+            self._select_row(ids.index(cur) if cur in ids else 0)
             if len(keep) > 1:          # keep a multiple selection across rescans and searches
                 sm = self.table.selectionModel()
                 flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
@@ -2988,6 +3724,7 @@ class MainWindow(QMainWindow):
         music_view = self.filter == "music"
         for b in (self.view_disks, self.view_tunes):
             b.setVisible(music_view)
+        self.group_btn.setVisible(not (music_view and self.tune_view) and self.filter != "dups")
         self.export_tunes_btn.setVisible(music_view and self.tune_view)
         if not self.all_items:
             self.message.setText(
