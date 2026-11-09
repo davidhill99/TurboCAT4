@@ -3,7 +3,7 @@
 import hashlib
 import os
 
-from . import readers, whdload
+from . import music, readers, whdload
 from .catalogue import BLANK_SHA1
 from .readers import detect, ContainerResult
 
@@ -32,6 +32,8 @@ def analyse_container(kind, data, name, source, depth, catalogue, parent_id, num
             res = readers.read_hdf(path_on_disk if path_on_disk else data)
         elif kind == "folder":
             res = readers.read_folder(path_on_disk)
+        elif kind == "module":
+            res = readers.read_module(data, name)
         elif kind == "extadf":
             res = ContainerResult("extadf")
             res.warnings.append("extended ADF (MFM/copy-protected) not supported yet")
@@ -183,11 +185,13 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
             continue
         try:
             with open(path, "rb") as fh:
-                head = fh.read(1024)
+                head = fh.read(2048)
         except OSError:
             summary["ignored"] += 1
             continue
-        kind = detect(path, head, size)
+        kind = detect(path, head[:1024], size)
+        if kind is None and music.identify(os.path.basename(path), head):
+            kind = "module"          # a tune on its own, straight from a PC folder
         if kind is None:
             summary["ignored"] += 1
             continue

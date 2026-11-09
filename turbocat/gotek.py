@@ -106,6 +106,8 @@ def plan(cat, top_ids):
                        "convert them to HFE first")
             elif top["kind"] in ARCHIVE_KINDS:
                 why = "archive with no floppy images in it"
+            elif top["kind"] == "module":
+                why = "a music module, not a floppy image"
             else:
                 why = "not a floppy image"
             p.skipped.append((top["number"], label, why))

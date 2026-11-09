@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS music (
 CREATE INDEX IF NOT EXISTS ix_music_key ON music(key);
 """
 
-READABLE = ("adf", "adz", "dms", "zip", "lha", "folder")
+READABLE = ("adf", "adz", "dms", "zip", "lha", "folder", "module")
 NOT_MODULES = (".library", ".device", ".font", ".iff", ".ilbm", ".pic", ".txt", ".doc", ".guide",
                ".readme", ".catalog", ".info", ".lha", ".lzx", ".zip", ".dms", ".adf")
 NOT_PICTURES = (".library", ".device", ".mod", ".doc", ".txt", ".guide", ".readme", ".s",
@@ -100,6 +100,8 @@ def _files_in(kind, data, path=None):
     """List a container's files (with readers) without the slow filesystem check."""
     if kind == "folder":
         return readers.read_folder(path).files
+    if kind == "module":
+        return readers.read_module(data, path or "module").files
     if kind in ("adf", "adz", "dms"):
         return readers.read_adf(_unpack_floppy(kind, data), validate=False).files
     return readers.READERS[kind](data).files
@@ -206,7 +208,7 @@ def find_on_item(cat, top):
                 continue
             named_mod = music.NAME_HINT.search(fe.path) is not None
             maybe_pic = 1500 <= fe.size <= MAX_PIC_SIZE and not low.endswith(NOT_PICTURES)
-            maybe_mod = 600 <= fe.size <= 4_000_000 and (
+            maybe_mod = 600 <= fe.size <= 32_000_000 and (
                 named_mod or (fe.size >= 1084 and not low.endswith(NOT_MODULES)))
             if not (maybe_pic or maybe_mod):
                 continue
@@ -479,6 +481,8 @@ def item_titles(cat, m):
 def lookup_online(cat, progress=None, stop=lambda: False, force=False):
     """For items without a picture of their own, fetch one from libretro-thumbnails."""
     ensure_schema(cat)
+    if progress:
+        progress(0, 0, None)          # 0 of 0: fetching the list of pictures (a few MB, cached)
     index = online_index()
     thumbs = thumbs_by_key(cat)
     todo = []
@@ -491,10 +495,13 @@ def lookup_online(cat, progress=None, stop=lambda: False, force=False):
         if m["status"] == "empty" or m["kind"] in ("hdf", "folder"):
             continue
         todo.append(m)
-    got = 0
+    got = looked = 0
+    stopped = False
     for i, m in enumerate(todo):
         if stop():
+            stopped = True
             break
+        looked += 1
         if progress:
             progress(i, len(todo), m)
         key = item_key(m)
@@ -533,4 +540,4 @@ def lookup_online(cat, progress=None, stop=lambda: False, force=False):
     cat.db.commit()
     if progress:
         progress(len(todo), len(todo), None)
-    return {"looked": len(todo), "found": got}
+    return {"looked": looked, "found": got, "stopped": stopped}

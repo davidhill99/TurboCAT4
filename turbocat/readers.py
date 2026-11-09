@@ -431,5 +431,20 @@ def read_folder(path: str) -> ContainerResult:
     return res
 
 
+def read_module(data: bytes, name: str = "module") -> ContainerResult:
+    """A music module on its own (a .mod, .xm, .s3m... in a PC folder): one item holding one tune."""
+    from . import music
+    res = ContainerResult("module")
+    found = music.identify(name, data)
+    if found:
+        res.info["format"] = f"{found[0]} music module"
+        if found[1]:
+            res.volume = found[1]
+    res.files.append(FileEntry(os.path.basename(name), len(data), None, "", "", False,
+                               (lambda d=data: d)))
+    return res
+
+
 READERS = {"adf": read_adf, "dms": read_dms, "adz": read_adz,
-           "lha": read_lha, "lzx": read_lzx, "zip": read_zip}
+           "lha": read_lha, "lzx": read_lzx, "zip": read_zip,
+           "module": read_module}

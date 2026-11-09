@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 
@@ -47,6 +48,130 @@ CREATE INDEX IF NOT EXISTS ix_files_media  ON files(media_id);
 CREATE INDEX IF NOT EXISTS ix_files_sha1   ON files(sha1);
 CREATE INDEX IF NOT EXISTS ix_files_name   ON files(name COLLATE NOCASE);
 """
+
+# ---------------------------------------------------------------- searching
+
+def search_words(text):
+    """The words of a search. Spaces, underscores and dashes all separate words, so
+    "space debris" finds space_debris.mod and "lemmings 2" finds Lemmings_2_The_Tribes.adf."""
+    return [w for w in re.split(r"[\s_\-]+", text.lower()) if w]
+
+
+def matches(words, *fields):
+    """True if every word appears somewhere in the fields."""
+    hay = " ".join((f or "") for f in fields).lower()
+    return all(w in hay for w in words)
+
+
+def _like_all(words, columns):
+    """SQL requiring every word in at least one of the columns, and its parameters."""
+    parts, args = [], []
+    for w in words:
+        pat = "%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        parts.append("(" + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in columns) + ")")
+        args += [pat] * len(columns)
+    return " AND ".join(parts) or "1", args
+
+
+# ---------------------------------------------------------------- safety copies
+# The window checks the catalogue each time it starts, keeps a copy of a healthy one, and offers
+# the newest copy back if the file has been damaged. Copies live in a folder beside the catalogue
+# (turbocat.db -> turbocat-backups/), made with SQLite's own backup, so recent changes still in
+# the journal (-wal) file are included.
+BACKUP_KEEP = 5               # copies kept
+BACKUP_EVERY = 3600           # seconds: at most one new copy an hour, so older ones survive restarts
+
+
+def backup_folder(path):
+    return os.path.splitext(os.path.abspath(path))[0] + "-backups"
+
+
+def _readonly(path):
+    return sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True, timeout=30)
+
+
+def check(path):
+    """(True, "") if the catalogue opens and SQLite's quick check passes (or there is no file
+    yet), otherwise (False, what SQLite said)."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return True, ""
+    try:
+        con = _readonly(path)
+        try:
+            result = [r[0] for r in con.execute("PRAGMA quick_check(5)")]
+        finally:
+            con.close()
+    except sqlite3.Error as ex:
+        return False, str(ex)
+    return (True, "") if result == ["ok"] else (False, "; ".join(result))
+
+
+def backups(path):
+    """Copies of this catalogue, newest first: [(file, made at (seconds), items)]."""
+    folder = backup_folder(path)
+    out = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".db"):
+            continue
+        f = os.path.join(folder, name)
+        try:
+            con = _readonly(f)
+            items = con.execute("SELECT count(*) FROM media WHERE parent_id IS NULL").fetchone()[0]
+            con.close()
+        except sqlite3.Error:
+            continue
+        out.append((f, os.path.getmtime(f), items))
+    return sorted(out, key=lambda b: -b[1])
+
+
+def make_backup(path, force=False):
+    """Copy a healthy catalogue into its backups folder; returns the copy's path, or None if a
+    recent copy already exists. Call only after check() passed."""
+    if not os.path.exists(path):
+        return None
+    folder = backup_folder(path)
+    os.makedirs(folder, exist_ok=True)
+    have = sorted(n for n in os.listdir(folder) if n.endswith(".db"))
+    if not force and have and time.time() - os.path.getmtime(os.path.join(folder, have[-1])) < BACKUP_EVERY:
+        return None
+    stem = os.path.splitext(os.path.basename(path))[0]
+    target = os.path.join(folder, f"{stem}-{time.strftime('%Y-%m-%d_%H%M%S')}.db")
+    src, dst = _readonly(path), sqlite3.connect(target + ".part")
+    try:
+        src.backup(dst)
+        dst.execute("PRAGMA journal_mode=DELETE")     # one self-contained file, no -wal/-shm
+    finally:
+        dst.close()
+        src.close()
+    os.replace(target + ".part", target)
+    have = sorted(n for n in os.listdir(folder) if n.endswith(".db"))
+    for old in have[:-BACKUP_KEEP]:
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(os.path.join(folder, old + suffix)):
+                os.remove(os.path.join(folder, old + suffix))
+    return target
+
+
+def restore(path, copy):
+    """Put a backup copy in place of a damaged catalogue. The damaged file (and its -wal/-shm
+    files) is kept beside it, renamed; returns its new name."""
+    stamp = time.strftime("%Y-%m-%d_%H%M%S")
+    damaged = f"{path}.damaged-{stamp}"
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(path + suffix):
+            os.replace(path + suffix, damaged + suffix)
+    src, dst = _readonly(copy), sqlite3.connect(path + ".part")
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    os.replace(path + ".part", path)
+    return damaged
 
 
 class Catalogue:
@@ -152,38 +277,48 @@ class Catalogue:
         Returns {top_id: {"why": [short reasons], "files": n, "first_file": path}};
         "files" counts matching files inside the item (counting stops at max_files).
         """
-        like = f"%{text}%"
-        low = text.lower()
+        words = search_words(text)
         top = self.top_ids()
         hits = {}
 
         def hit(mid):
             return hits.setdefault(top.get(mid, mid), {"why": [], "files": 0, "first_file": ""})
 
-        for m in self.db.execute(
-                """SELECT * FROM media WHERE source LIKE ? OR inner_path LIKE ? OR volume LIKE ?
-                   OR whd_name LIKE ? OR text LIKE ?""", (like,) * 5):
+        if not words:
+            return hits
+        cols = ("source", "inner_path", "volume", "whd_name", "text")
+        where, args = _like_all(words, cols)
+        for m in self.db.execute(f"SELECT * FROM media WHERE {where}", args):
             h = hit(m["id"])
-            if low in (m["whd_name"] or "").lower():
+            if matches(words, m["whd_name"]):
                 h["why"].append(f"WHDLoad game {m['whd_name']}")
-            elif low in (m["volume"] or "").lower():
+            elif matches(words, m["volume"]):
                 h["why"].append(f"volume {m['volume']}")
-            elif low in (m["inner_path"] or "").lower():
+            elif matches(words, m["inner_path"]):
                 h["why"].append(f"inside: {m['inner_path']}")
-            elif low not in m["source"].lower():
+            elif not matches(words, m["source"]):
                 try:
                     texts = json.loads(m["text"] or "[]")
                 except ValueError:
                     texts = []
-                found = next((t for t in texts if low in t.lower()), "")
+                found = next((t for t in texts if matches(words, t)), "")
                 h["why"].append(f'disk text "{found[:60]}"' if found else "disk text")
+        where, args = _like_all(words, ("name", "comment"))
         for f in self.db.execute(
-                """SELECT media_id, path FROM files WHERE name LIKE ? OR comment LIKE ?
-                   ORDER BY path LIMIT ?""", (like, like, max_files)):
+                f"SELECT media_id, path FROM files WHERE {where} ORDER BY path LIMIT ?",
+                args + [max_files]):
             h = hit(f["media_id"])
             h["files"] += 1
             if not h["first_file"]:
                 h["first_file"] = f["path"]
+        # Tunes by their own titles ("stardust memories" is inside stardstm.mod).
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='music'").fetchone():
+            where, args = _like_all(words, ("title",))
+            for r in self.db.execute(f"SELECT media_id, title FROM music WHERE {where}", args):
+                h = hit(r["media_id"])
+                why = f'tune "{r["title"]}"'
+                if why not in h["why"]:
+                    h["why"].append(why)
         return hits
 
     # ------------------------------------------------------------ scanned folders

@@ -213,6 +213,26 @@ class Module:
 
 # ---------------------------------------------------------------- libxmp (second opinion)
 
+def versions():
+    """{"libopenmpt": "0.7.13" or None, "libxmp": "4.6.0" or None} for the About box."""
+    out = {"libopenmpt": None, "libxmp": None}
+    lib = _Lib.get()
+    if lib is not None:
+        try:
+            lib.openmpt_get_library_version.restype = ctypes.c_uint32
+            v = lib.openmpt_get_library_version()
+            out["libopenmpt"] = f"{v >> 24}.{(v >> 16) & 0xFF}.{v & 0xFFFF}"
+        except Exception:
+            out["libopenmpt"] = "installed"
+    xmp = _Xmp.get()
+    if xmp is not None:
+        try:
+            out["libxmp"] = ctypes.c_char_p.in_dll(xmp, "xmp_version").value.decode()
+        except Exception:
+            out["libxmp"] = "installed"
+    return out
+
+
 class _Xmp:
     lib = None
 

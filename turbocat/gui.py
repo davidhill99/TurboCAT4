@@ -18,10 +18,10 @@ from PySide6.QtCore import (QAbstractTableModel, QIODevice, QItemSelectionModel,
                             QObject, QRectF, QSize, QSortFilterProxyModel, Qt, QThread, QTimer,
                             QUrl, Signal)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
-                           QKeySequence, QPainter, QPen, QPixmap, QShortcut)
+                           QAction, QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog,
-                               QFrame, QGridLayout, QListWidget, QListWidgetItem, QMessageBox,
+                               QFrame, QGridLayout, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QRadioButton,
                                QButtonGroup, QHBoxLayout, QProgressBar,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QPushButton,
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 
 from . import APP_NAME, VERSION
 from .bootblock import best_title
-from .catalogue import Catalogue
+from .catalogue import Catalogue, matches, search_words
 from . import emulator, games, gotek, music, pictures, turboview
 from .scanner import rescan_all, scan
 
@@ -67,7 +67,8 @@ IMAGE_KINDS = ("adf", "dms", "adz", "hdf", "lha", "lzx", "zip")
 ARCHIVE_KINDS = ("lha", "lzx", "zip")
 DISK_KINDS = ("adf", "dms", "adz", "hdf")
 KIND_ICON = {"adf": "disk", "dms": "disk", "adz": "disk", "hdf": "harddrive",
-             "lha": "archive", "lzx": "archive", "zip": "archive", "folder": "folder"}
+             "lha": "archive", "lzx": "archive", "zip": "archive", "folder": "folder",
+             "module": "music"}
 STATUS = {"ok": ("OK", "ok", "ok-tint", None),
           "warning": ("Warning", "warn", "warn-tint", "warning"),
           "error": ("Problem", "problem", "problem-tint", "problem"),
@@ -220,7 +221,8 @@ def load_items(cat):
         elif disk is not m:
             typ, ico = f"{dkind.upper()} in {kind.upper()}", KIND_ICON.get(dkind, "disk")
         else:
-            typ, ico = ("Folder" if kind == "folder" else kind.upper()), KIND_ICON.get(kind, "disk")
+            typ, ico = ({"folder": "Folder", "module": "Module"}.get(kind, kind.upper()),
+                        KIND_ICON.get(kind, "disk"))
 
         status = disk["status"] or "ok"
         worst = max([m] + kids, key=lambda r: rank.get(r["status"], 0))
@@ -1464,7 +1466,7 @@ class PlayerBar(QFrame):
 
 class PictureWorker(QThread):
     """Look for icons and pictures on items not yet looked at; optionally online too."""
-    progress = Signal(str, int, int)
+    progress = Signal(str, int, int, str)      # phase, done, total, what it is looking at
     done = Signal(object)
     failed = Signal(str)
 
@@ -1477,14 +1479,20 @@ class PictureWorker(QThread):
         try:
             cat = Catalogue(self.db_path)
             stop = lambda: self.stop_wanted
+            def name(m):
+                try:
+                    return os.path.basename(m["source"])
+                except Exception:
+                    return ""
+
             res = {"disk": pictures.build(
-                cat, lambda i, n, m: self.progress.emit("disk", i, n), stop)}
+                cat, lambda i, n, m: self.progress.emit("disk", i, n, name(m)), stop)}
             if not self.stop_wanted:
                 res["lengths"] = pictures.measure_music(
-                    cat, lambda i, n, m: self.progress.emit("lengths", i, n), stop)
+                    cat, lambda i, n, m: self.progress.emit("lengths", i, n, ""), stop)
             if self.online and not self.stop_wanted:
                 res["online"] = pictures.lookup_online(
-                    cat, lambda i, n, m: self.progress.emit("online", i, n), stop)
+                    cat, lambda i, n, m: self.progress.emit("online", i, n, name(m)), stop)
             if not self.stop_wanted:          # keep the Amiga's copy of the catalogue up to date
                 try:
                     folder = cat.get_meta("turboview_dir") or turboview.default_folder()
@@ -1897,6 +1905,132 @@ class GotekDialog(QDialog):
         super().reject()
 
 
+class AboutDialog(QDialog):
+    """About TurboCAT 4: version, the catalogue in use and its safety copies, what it is built on."""
+
+    REPO = "https://github.com/davidhill99/TurboCAT4"
+
+    def __init__(self, parent, cat, db_path):
+        super().__init__(parent)
+        from . import catalogue as catalogue_mod
+        import platform
+        import PySide6
+        from PySide6.QtCore import qVersion
+        self.setObjectName("dialog")
+        self.setWindowTitle(f"About {APP_NAME}")
+        self.setMinimumWidth(560)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(28, 24, 28, 20)
+        v.setSpacing(14)
+
+        top = QHBoxLayout()
+        top.setSpacing(16)
+        mark = QLabel()
+        mark.setPixmap(icon("mark", 64))
+        mark.setFixedSize(64, 64)
+        top.addWidget(mark, 0, Qt.AlignmentFlag.AlignTop)
+        words = QVBoxLayout()
+        words.setSpacing(2)
+        name = QLabel(f"TurboCAT <span style='color:{C['accent'].name()}'>4</span>")
+        name.setFont(ui_font(26, QFont.Weight.Bold))
+        name.setTextFormat(Qt.TextFormat.RichText)
+        words.addWidget(name)
+        ver = QLabel(f"Version {VERSION}")
+        ver.setObjectName("muted")
+        ver.setFont(data_font(12))
+        ver.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        words.addWidget(ver)
+        top.addLayout(words, 1)
+        v.addLayout(top)
+
+        v.addWidget(_wrap_label(
+            "Catalogue and search your Amiga disk images, archives and folders: what is on every "
+            "disk, which are games, which have problems or duplicates, their pictures and their "
+            "music. A modern revival of TurboCAT and TurboCAT-Pro by David Hill (1994–1996).",
+            ui_font(13)))
+
+        def section(title):
+            lab = QLabel(title.upper())
+            lab.setObjectName("muted")
+            lab.setFont(ui_font(11, QFont.Weight.DemiBold))
+            v.addWidget(lab)
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(16)
+            grid.setVerticalSpacing(4)
+            grid.setColumnStretch(1, 1)
+            v.addLayout(grid)
+            return grid
+
+        def row(grid, label, value, muted=False):
+            r = grid.rowCount()
+            k = QLabel(label)
+            k.setObjectName("muted")
+            k.setFont(ui_font(12))
+            k.setMinimumWidth(110)           # both sections line up
+            grid.addWidget(k, r, 0, Qt.AlignmentFlag.AlignTop)
+            val = _wrap_label(value, ui_font(12), "muted" if muted else None)
+            grid.addWidget(val, r, 1)
+
+        # The catalogue in use, and its safety copies
+        g = section("Your catalogue")
+        st = cat.stats()                 # the same counts as the window's header
+        items, files = st["items"], st["files"]
+        try:
+            size = _short_size(os.path.getsize(db_path))
+        except OSError:
+            size = "?"
+        row(g, "File", db_path)
+        row(g, "Holds", f"{_n(items, 'item')}, {files:,} files · {size}")
+        self.backup_dir = catalogue_mod.backup_folder(db_path)
+        copies = catalogue_mod.backups(db_path)
+        if copies:
+            newest = time.strftime("%-d %b %Y, %H:%M", time.localtime(copies[0][1]))
+            row(g, "Safety copies", f"{len(copies)} cop{'y' if len(copies) == 1 else 'ies'}, newest {newest}\n{self.backup_dir}")
+        else:
+            row(g, "Safety copies", "None yet: one is made when TurboCAT next starts", muted=True)
+
+        # What it runs on
+        g = section("Built with")
+        row(g, "Python", platform.python_version())
+        row(g, "Qt", f"{qVersion()} (PySide6 {PySide6.__version__})")
+        try:
+            from importlib.metadata import version as pkg_version
+            ami = pkg_version("amitools")
+        except Exception:
+            ami = "installed"
+        row(g, "amitools", f"{ami}: reads Amiga disks and filesystems")
+        vers = music.versions()
+        row(g, "libopenmpt", f"{vers['libopenmpt']}: plays music modules" if vers["libopenmpt"]
+            else "not installed: music can't play (sudo apt install libopenmpt0)",
+            muted=not vers["libopenmpt"])
+        row(g, "libxmp", f"{vers['libxmp']}: plays OctaMED synth tunes" if vers["libxmp"]
+            else "not installed: OctaMED synth tunes stay silent (sudo apt install libxmp4)",
+            muted=not vers["libxmp"])
+        row(g, "Pictures", "found on your disks first, then in the libretro-thumbnails collection")
+
+        link = QLabel(f"<a href='{self.REPO}' style='color:{C['accent'].name()}'>{self.REPO}</a>")
+        link.setFont(ui_font(12))
+        link.setTextFormat(Qt.TextFormat.RichText)
+        link.setOpenExternalLinks(True)
+        v.addWidget(link)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        if copies:
+            open_btn = QPushButton("Show safety copies")
+            open_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
+            open_btn.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.backup_dir)))
+            buttons.addWidget(open_btn)
+        close = QPushButton("Close")
+        close.setObjectName("primary")
+        close.setFont(ui_font(13, QFont.Weight.DemiBold))
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        v.addLayout(buttons)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, db_path):
         super().__init__()
@@ -2015,7 +2149,7 @@ class MainWindow(QMainWindow):
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.stop_btn.setObjectName("small")
-        self.stop_btn.clicked.connect(self.stop_scan)
+        self.stop_btn.clicked.connect(self._stop_clicked)
         sb.addWidget(self.scan_busy)
         sb.addWidget(self.scan_text)
         sb.addWidget(self.scan_file, 1)
@@ -2176,12 +2310,12 @@ class MainWindow(QMainWindow):
         self.search.edit.returnPressed.connect(self.run_search)
         QShortcut(QKeySequence.StandardKey.Find, self, activated=self.focus_search)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self.search.edit, activated=self.search.edit.clear)
-        QShortcut(QKeySequence(Qt.Key.Key_F5), self, activated=self.rescan)
-        QShortcut(QKeySequence("Ctrl+G"), self, activated=lambda: self.copy_to_gotek())
-        QShortcut(QKeySequence("Ctrl+P"), self, activated=lambda: self.play_in_emulator())
-        self.table.doubleClicked.connect(lambda _i: self.play_in_emulator())
+        self.table.doubleClicked.connect(lambda _i: self.play_selected())
+        self._build_menus()
         self.emulators = None
         self.worker = None
+        self.bar_mode = "scan"
+        self.pic_asked = self.pic_shown = False
         self.hide_bar = QTimer(self, singleShot=True, interval=10000)
         self.hide_bar.timeout.connect(self.scan_bar.hide)
         self.live = QTimer(self, interval=4000)      # show new items while a scan runs
@@ -2212,9 +2346,98 @@ class MainWindow(QMainWindow):
             rows = [self.table.currentIndex().row()]
         return [self.model.items[r].id for r in rows if r < len(self.model.items)]
 
+    def _build_menus(self):
+        """The menu bar: every command, with its keyboard shortcut. The header buttons are
+        shortcuts to the most used ones."""
+        bar = self.menuBar()
+
+        def add(menu, text, slot, keys=None, tip=None):
+            a = QAction(text, self)
+            if keys:
+                a.setShortcut(QKeySequence(keys))
+            if tip:
+                a.setStatusTip(tip)
+                a.setToolTip(tip)
+            a.triggered.connect(lambda _=False: slot())
+            menu.addAction(a)
+            return a
+
+        m = bar.addMenu("&File")
+        self.act_scan = add(m, "&Scan folder…", self.scan_folder, "Ctrl+O",
+                            "Add a folder of Amiga disk images to the catalogue")
+        self.act_rescan = add(m, "&Rescan", self.rescan, "F5",
+                              "Look again at every folder scanned before")
+        m.addSeparator()
+        add(m, "&Export tune list…", self.export_tune_list, None,
+            "Save every tune found as a spreadsheet")
+        m.addSeparator()
+        add(m, "&Quit", self.close, "Ctrl+Q")
+
+        m = bar.addMenu("&Disk")
+        self.act_play = add(m, "&Play", self.play_selected, "Ctrl+P",
+                            "Start the disk in an emulator, or play a tune in TurboCAT")
+        self.act_gotek = add(m, "Copy to &Gotek stick…", lambda: self.copy_to_gotek(), "Ctrl+G")
+        self.act_folder = add(m, "Show in &folder", self.show_selected_in_folder, "Ctrl+Shift+O",
+                              "Open the folder holding the selected item")
+
+        m = bar.addMenu("&Tools")
+        self.act_online = add(m, "Find pictures &online", self.find_online, None,
+                              "Look up title screens in the libretro-thumbnails collection")
+        add(m, "Start &TurboView", self.start_turboview, None,
+            "Start an emulated Amiga with TurboView and your collection mounted")
+
+        m = bar.addMenu("&Help")
+        add(m, f"&About {APP_NAME}", self.show_about, "F1")
+        add(m, f"{APP_NAME} on &GitHub", lambda: QDesktopServices.openUrl(QUrl(AboutDialog.REPO)))
+        self._selection_changed()
+
+    def show_selected_in_folder(self):
+        ids = self.selected_ids()
+        m = self.cat.media_by_id(ids[0]) if ids else None
+        if m is None:
+            return
+        src = m["source"]
+        QDesktopServices.openUrl(QUrl.fromLocalFile(src if os.path.isdir(src) else os.path.dirname(src)))
+
+    def export_tune_list(self):
+        """File > Export tune list: the Tunes view's list, switching to it if needed."""
+        if self.filter != "music":
+            self.set_filter("music")
+        self.set_tune_view(True)
+        self.export_tunes()
+
     def _selection_changed(self):
         n = len(self.table.selectionModel().selectedRows())
         self.gotek_btn.setText(f"Copy {n:,} to Gotek stick" if n > 1 else "Copy to Gotek stick")
+        if hasattr(self, "act_play"):
+            ids = self.selected_ids()
+            chosen = [it for it in self.model.items if it.id in set(ids)]
+            tunes = bool(chosen) and all(it.type == "Module" for it in chosen)
+            self.act_play.setText("&Play tune" if tunes else "&Play in emulator")
+            self.act_gotek.setText(f"Copy {n:,} to &Gotek stick…" if n > 1 else "Copy to &Gotek stick…")
+            for a in (self.act_play, self.act_gotek, self.act_folder):
+                a.setEnabled(bool(ids))
+
+    def show_about(self):
+        dlg = AboutDialog(self, self.cat, self.db_path)
+        dlg.exec()
+        dlg.deleteLater()      # don't leave it to Python's shutdown (that crashed on exit)
+
+    def play_selected(self):
+        """Double-click / Ctrl+P: a tune on its own plays in TurboCAT's player; disks start in
+        the emulator."""
+        ids = self.selected_ids()
+        chosen = [it for it in self.model.items if it.id in set(ids)]
+        if chosen and all(it.type == "Module" for it in chosen):
+            rows, labels = [], []
+            for it in chosen:
+                for r in self.cat.db.execute("SELECT * FROM music WHERE key=? ORDER BY rowid", (it.key,)):
+                    rows.append(r)
+                    labels.append(f"#{it.number:04d}")
+            if rows:
+                self.player_bar.play(rows, 0, labels=labels)
+            return
+        self.play_in_emulator(ids)
 
     def play_in_emulator(self, ids=None):
         """Start the selected disks in Amiberry or FS-UAE (a single disk brings its whole set)."""
@@ -2321,6 +2544,7 @@ class MainWindow(QMainWindow):
         self.hide_bar.stop()
         self.scan_text.setText(text)
         self.scan_file.setText("")
+        self.bar_mode = "scan"
         self.scan_busy.setRange(0, 0)          # busy until the first progress report
         self.read_started = None
         self.scan_busy.show()
@@ -2328,7 +2552,9 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(True)
         self.scan_bar.show()
         self.scan_btn.setEnabled(False)
+        self.act_scan.setEnabled(False)
         self.rescan_btn.setEnabled(False)
+        self.act_rescan.setEnabled(False)
         self.found_count = 0
         self.stop_pictures()
         self.worker = ScanWorker(self.db_path, folders)
@@ -2339,6 +2565,16 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self._scan_finished)
         self.worker.start()
         self.live.start()
+
+    def _stop_clicked(self):
+        if self.bar_mode == "pictures":
+            if self.pic_worker is not None:
+                self.pic_worker.stop_wanted = True
+                self.stop_btn.setEnabled(False)
+                self.scan_text.setText("Stopping after the current disk…")
+                self.scan_file.setText("")
+        else:
+            self.stop_scan()
 
     def stop_scan(self):
         if self.worker is not None:
@@ -2420,22 +2656,30 @@ class MainWindow(QMainWindow):
         self.live.stop()
         self.worker = None
         self.scan_btn.setEnabled(True)
+        self.act_scan.setEnabled(True)
         self.rescan_btn.setEnabled(True)
+        self.act_rescan.setEnabled(True)
         self.find_pictures()
 
     # -------------------------------------------------------------- pictures
-    def find_pictures(self, online=None):
-        """Look for pictures on new items (and online, once the user has agreed to that)."""
+    def find_pictures(self, online=None, asked=False):
+        """Look for pictures on new items (and online, once the user has agreed to that).
+        asked: the user asked for this, so the progress bar shows from the start."""
         if self.pic_worker is not None or self.worker is not None:
             return
         if online is None:
             online = bool(self.cat.get_meta("online_pictures", False))
+        self.pic_asked = asked
+        self.pic_shown = False
+        if asked:
+            self._pic_bar("Getting ready to look for pictures online…", 0, 0, "")
         self.pic_worker = PictureWorker(self.db_path, online)
         self.pic_worker.progress.connect(self._pic_progress)
         self.pic_worker.done.connect(self._pic_done)
-        self.pic_worker.failed.connect(lambda e: self._pic_note(f"Finding pictures failed: {e}"))
+        self.pic_worker.failed.connect(self._pic_failed)
         self.pic_worker.finished.connect(self._pic_finished)
         self.online_btn.setEnabled(False)
+        self.act_online.setEnabled(False)
         self.pic_worker.start()
         self.pic_refresh.start()
 
@@ -2458,8 +2702,11 @@ class MainWindow(QMainWindow):
             self.cat.set_meta("online_pictures", True)
         if self.pic_worker is not None:      # finish the disk search first, then go online
             self.pic_worker.online = True
+            self.pic_asked = True
+            if not self.pic_shown:
+                self._pic_bar("Finishing the search on your disks, then going online…", 0, 0, "")
             return
-        self.find_pictures(online=True)
+        self.find_pictures(online=True, asked=True)
 
     def stop_pictures(self):
         if self.pic_worker is not None:
@@ -2469,15 +2716,38 @@ class MainWindow(QMainWindow):
     def _pic_note(self, text):
         self.foot_left.setText(text)
 
-    def _pic_progress(self, phase, i, n):
+    def _pic_bar(self, text, i, n, what):
+        """Show the picture search in the progress bar under the search box (with Stop)."""
+        self.bar_mode = "pictures"
+        self.pic_shown = True
+        self.hide_bar.stop()
+        if n:
+            self.scan_busy.setRange(0, n)
+            self.scan_busy.setValue(i)
+        else:
+            self.scan_busy.setRange(0, 0)       # moving bar: working, length unknown
+        self.scan_text.setText(text)
+        self.scan_file.setText(what)
+        self.scan_bar.setToolTip("")
+        self.stop_btn.show()
+        self.stop_btn.setEnabled(not (self.pic_worker and self.pic_worker.stop_wanted))
+        self.scan_bar.show()
+
+    def _pic_progress(self, phase, i, n, what=""):
+        if phase == "online" and not n:
+            self._pic_bar("Getting the list of pictures from GitHub…", 0, 0,
+                          "libretro-thumbnails, Commodore Amiga")
+            return
         if not n or i >= n:
             return
-        if phase == "disk":
-            self._pic_note(f"Looking for pictures and music on disks… {i:,} of {n:,}")
-        elif phase == "lengths":
-            self._pic_note(f"Measuring tunes… {i:,} of {n:,}")
-        else:
-            self._pic_note(f"Looking for pictures online… {i:,} of {n:,}")
+        text = {"disk": "Looking for pictures and music on disks…",
+                "lengths": "Measuring tunes…",
+                "online": "Looking for pictures online…"}[phase]
+        self._pic_note(f"{text} {i:,} of {n:,}")
+        # Little jobs in the background stay in the footer; anything bigger, or anything the
+        # user asked for, gets the progress bar.
+        if self.pic_asked or self.pic_shown or phase == "online" or n >= 20:
+            self._pic_bar(f"{text} {i + 1:,} of {n:,}", i, n, what)
 
     def _pic_done(self, res):
         bits = []
@@ -2487,16 +2757,39 @@ class MainWindow(QMainWindow):
         if res.get("turboview_error"):
             bits.append(f"TurboView catalogue not written: {res['turboview_error']}")
         if "online" in res and res["online"]["looked"]:
-            bits.append(f"{res['online']['found']:,} pictures found online")
+            n, looked = res["online"]["found"], res["online"]["looked"]
+            bits.append(f"{n:,} picture{'' if n == 1 else 's'} found online for "
+                        f"{looked:,} disk{'' if looked == 1 else 's'} looked up")
+        if res.get("online", {}).get("stopped"):
+            bits.insert(0, "Stopped")
+        if self.pic_shown and "online" in res and not res["online"]["looked"] \
+                and not res["online"].get("stopped"):
+            bits.append("every disk without a picture has been looked up online already")
         self.reload()
         if bits:
             self._pic_note(" · ".join(bits))
             QTimer.singleShot(15000, self._fill_counts)
+        if self.pic_shown:
+            self._pic_bar_end(_cap(" · ".join(bits)) if bits else "Finished: nothing new found")
+
+    def _pic_bar_end(self, text):
+        self.scan_busy.setRange(0, 1)
+        self.scan_busy.setValue(1)
+        self.scan_text.setText(text)
+        self.scan_file.setText("")
+        self.stop_btn.hide()
+        self.hide_bar.start()
+
+    def _pic_failed(self, err):
+        self._pic_note(f"Finding pictures failed: {err}")
+        if self.pic_shown:
+            self._pic_bar_end(f"Finding pictures failed: {err}")
 
     def _pic_finished(self):
         self.pic_worker = None
         self.pic_refresh.stop()
         self.online_btn.setEnabled(True)
+        self.act_online.setEnabled(True)
 
     def reload(self):
         """Re-read the catalogue after a scan, keeping the search and selection."""
@@ -2633,14 +2926,14 @@ class MainWindow(QMainWindow):
         for it in self.all_items:
             by_key.setdefault(it.key, it)
         rows = []
-        low = text.lower()
+        words = search_words(text)
         for key, tunes in pictures.music_by_key(self.cat).items():
             it = by_key.get(key)
             if it is None:
                 continue
             for r in tunes:
-                if low and not any(low in (x or "").lower() for x in
-                                   (r["title"], r["file"], r["shown"], r["fmt"], it.file, it.title)):
+                if words and not matches(words, r["title"], r["file"], r["shown"], r["fmt"],
+                                         it.file, it.title):
                     continue
                 rows.append((r, it))
         keep = self._current_tune()
@@ -2753,6 +3046,16 @@ class MainWindow(QMainWindow):
             QPushButton#primary:hover {{ background: {c['accent-ink']}; }}
             QPushButton#primary:disabled {{ background: {c['line']}; border-color: {c['line']};
                                             color: {c['ink-muted']}; }}
+            QMenuBar {{ background: {c['chrome']}; color: {c['ink']}; border-bottom: 1px solid {c['line']};
+                        padding: 2px 8px; }}
+            QMenuBar::item {{ padding: 5px 10px; border-radius: 4px; background: transparent; }}
+            QMenuBar::item:selected, QMenuBar::item:pressed {{ background: {c['accent-tint']}; }}
+            QMenu::item:disabled {{ color: {c['ink-muted']}; }}
+            QMenu::separator {{ height: 1px; background: {c['line']}; margin: 4px 8px; }}
+            QMenu {{ background: {c['surface']}; color: {c['ink']}; border: 1px solid {c['line']};
+                     padding: 4px; }}
+            QMenu::item {{ padding: 6px 20px 6px 12px; border-radius: 4px; }}
+            QMenu::item:selected {{ background: {c['accent-tint']}; color: {c['ink']}; }}
             QPushButton#chip {{ border-radius: 17px; min-height: 34px; padding: 0 14px; }}
             QPushButton#chip[hasIcon="true"] {{ padding-left: 10px; }}
             QPushButton#chip:checked {{ background: {c['accent-tint']}; border: 1px solid {c['accent']};
@@ -2795,12 +3098,56 @@ class MainWindow(QMainWindow):
         """)
 
 
+def _catalogue_ready(db_path):
+    """Check the catalogue before opening it. A healthy one gets a safety copy; a damaged one is
+    offered its newest copy back. False if the window can't open."""
+    from . import catalogue as C
+    ok, why = C.check(db_path)
+    if ok:
+        try:
+            C.make_backup(db_path)
+        except Exception as ex:          # a copy that fails must never stop TurboCAT starting
+            print(f"Couldn't make a safety copy of the catalogue: {ex}", file=sys.stderr)
+        return True
+    copies = C.backups(db_path)
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle(f"{APP_NAME}: the catalogue is damaged")
+    text = (f"The catalogue file can't be read:\n{db_path}\n\nSQLite says: {why}\n\n")
+    if not copies:
+        box.setText(text + "There is no safety copy to put back. The damaged file has been left as "
+                           "it is. Scanning your folders again into a new catalogue will rebuild it.")
+        box.setStandardButtons(QMessageBox.Close)
+        box.exec()
+        return False
+    f, made, items = copies[0]
+    box.setText(text + f"TurboCAT has a safety copy from {time.strftime('%d %b %Y, %H:%M', time.localtime(made))} "
+                       f"with {items:,} items. Put it back?\n\nThe damaged file is kept beside it, renamed, "
+                       "and anything changed after that copy was made will need scanning again.")
+    restore = box.addButton("Put the copy back", QMessageBox.AcceptRole)
+    box.addButton("Quit", QMessageBox.RejectRole)
+    box.setDefaultButton(restore)
+    box.exec()
+    if box.clickedButton() is not restore:
+        return False
+    try:
+        damaged = C.restore(db_path, f)
+    except Exception as ex:
+        QMessageBox.critical(None, APP_NAME, f"The copy couldn't be put back: {ex}")
+        return False
+    QMessageBox.information(None, APP_NAME, f"The safety copy is back in place.\n\n"
+                                            f"The damaged file is kept as:\n{damaged}")
+    return True
+
+
 def run(db_path):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(VERSION)
     _pick_theme()
     app.setFont(ui_font(14))
+    if not _catalogue_ready(db_path):
+        return 1
     w = MainWindow(db_path)
     w.show()
     return app.exec()
