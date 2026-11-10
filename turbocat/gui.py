@@ -6,11 +6,13 @@ selected item, and a status line.
 Run with:  python -m turbocat window   (add --db FILE for another catalogue)
 """
 
+import dataclasses
 import json
 import os
 import re
 import shutil
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -20,7 +22,7 @@ from PySide6.QtCore import (QAbstractTableModel, QIODevice, QItemSelectionModel,
 from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QAction, QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QGridLayout, QLayout, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QRadioButton,
                                QButtonGroup, QHBoxLayout, QProgressBar,
@@ -31,8 +33,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 from . import APP_NAME, VERSION
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
-from . import coverdisks, datlists, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
-from .scanner import rescan_all, scan
+from . import coverdisks, datlists, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
+from .scanner import BIG_ARCHIVE, recheck, rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -244,6 +246,7 @@ def load_items(cat):
                 ("Applications", "Compilations - Applications")):
             util_why[mid] = f"in TOSEC's {which} list"
     starred = favs.load(cat)
+    mag_covers = magcovers.covers(cat)
     rank = {"error": 3, "warning": 2}
     items = []
     for m in rows:
@@ -305,6 +308,14 @@ def load_items(cat):
         shares = frozenset({r["sha1"] for r in kids if r["kind"] in IMAGE_KINDS} & shared_sha
                            - {own_key})
         th = thumbs.get(pictures.item_key(m))
+        pic = pictures.picture_path(th["pic"]) or "" if th else ""
+        pic_from = (th["pic_from"] or "") if th else ""
+        pic_origin = (th["origin"] or "") if th else ""
+        if cover is not None and cover.magazine and cover.issue:
+            # a coverdisk shows the cover of the magazine it came with
+            found = mag_covers.get((cover.magazine, magcovers.issue_key(cover.issue)))
+            if found and os.path.exists(found[0]):
+                pic, pic_from, pic_origin = found[0], f"{found[1]}|{found[2]}", "cover"
         items.append(Item(
             id=m["id"], number=m["number"] or 0, file=os.path.basename(m["source"].rstrip("/")),
             path=m["source"], type=typ, icon=ico, title=title, from_text=from_text, files=files,
@@ -312,9 +323,7 @@ def load_items(cat):
             non_dos=non_dos and status != "empty",
             hard_drive=dkind in ("hdf", "folder") or any(k["kind"] == "hdf" for k in kids),
             thumb_icon=pictures.picture_path(th["icon"]) or "" if th else "",
-            pic=pictures.picture_path(th["pic"]) or "" if th else "",
-            pic_from=(th["pic_from"] or "") if th else "",
-            pic_origin=(th["origin"] or "") if th else "",
+            pic=pic, pic_from=pic_from, pic_origin=pic_origin,
             game=game_why.get(m["id"], ""), utility=util_why.get(m["id"], ""),
             verified=_verified(m, kids, lists),
             favourite=favs.item_key(pictures.item_key(m)) in starred,
@@ -350,10 +359,15 @@ def make_set_items(items):
         files = sum(int(m.files.replace(",", "")) for m in members if m.files.replace(",", "").isdigit())
         badge, tone = ds.badge()
         have = len(members)
+        # A coverdisk set (an issue's disks) is a coverdisk too, titled by its issue, not disk 1
+        cover = next((m.cover for m in members if m.cover is not None and m.cover.magazine), None)
+        if cover is not None:
+            cover = dataclasses.replace(cover, disk="", of="", label="", tosec_name="")
         row = Item(
             id=first.id, number=first.number, file=ds.key, path=first.path,
             type=f"Set of {ds.expected} disks" + (f" · {have} here" if have != ds.expected else ""),
-            icon=first.icon, title=first.title, from_text=first.from_text,
+            icon=first.icon, title=cover.title() if cover is not None else first.title,
+            from_text=first.from_text,
             files=f"{files:,}" if files else "—", status=worst.status, sha1="",
             non_dos=all(m.non_dos for m in members), hard_drive=False,
             thumb_icon=with_icon.thumb_icon, pic=with_pic.pic, pic_from=with_pic.pic_from,
@@ -362,7 +376,7 @@ def make_set_items(items):
             favourite=any(m.favourite for m in members),
             key=first.key, music=sum(m.music for m in members),
             members=tuple(m.id for m in members), set_badge=badge, set_tone=tone,
-            set_problem=not ds.complete, dset=ds)
+            set_problem=not ds.complete, dset=ds, cover=cover)
         rows.append(row)
         for n, m, _ in ds.disks:
             member_of[m.id] = row
@@ -862,6 +876,37 @@ class Note(QFrame):
         lay.addLayout(body, 1)
 
 
+class ElidedLabel(QLabel):
+    """A one-line label that shortens its text with … in the middle when there isn't room, so a
+    long path never makes the window wider (the whole text is in its tooltip)."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setMinimumWidth(40)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        self._full = text
+        self.setToolTip(text)
+        self._fit()
+
+    def text(self):
+        return self._full
+
+    def sizeHint(self):
+        return QSize(self.fontMetrics().horizontalAdvance(self._full) + 2, super().sizeHint().height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self):
+        QLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle,
+                                                           max(0, self.width())))
+
+
 class FlowLayout(QLayout):
     """Widgets in a row that wraps onto more lines when there isn't room, so a row of buttons
     never makes a narrow panel wider than the space it has."""
@@ -977,6 +1022,10 @@ class KeyButton(QPushButton):
         return QSize(self.layout().sizeHint().width(), super().sizeHint().height())
 
 
+PLAY_TIP = ("Start this disk (and the rest of its set) in Amiberry or FS-UAE "
+            "(Ctrl+P, or double-click it in the list)")
+
+
 class PictureView(QLabel):
     """A picture that fills the panel's width, keeping its shape (pixel art stays crisp)."""
 
@@ -1013,6 +1062,11 @@ class PictureView(QLabel):
             self.setPixmap(pm)
 
 
+RECHECK_TIP = ("Look again at just this (for a set, all its disks) and the folder it is in: a disk "
+               "you have replaced, added or deleted there is picked up without rescanning "
+               "everything (Shift+F5)")
+
+
 class DetailsPanel(QFrame):
     """Everything about the selected item: the right-hand panel of the design."""
     FACTS = ["Filesystem", "Bootblock", "Contents", "Status", "Size", "Scanned"]
@@ -1024,6 +1078,7 @@ class DetailsPanel(QFrame):
         self.on_select_number = on_select_number
         self.on_keep = None          # keep this copy of a duplicate (set by the window)
         self.on_favourite = None     # star / unstar what is shown (set by the window)
+        self.on_recheck = None       # look again at what is shown, and its folder (set by the window)
         self.item = None
         self.on_version = None       # show this version of a disk (set by the window)
         self.source = None
@@ -1158,10 +1213,9 @@ class DetailsPanel(QFrame):
         self.play_btn.setObjectName("primary")
         self.play_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.play_btn.setToolTip("Start this disk (and the rest of its set) in Amiberry or FS-UAE "
-                                 "(Ctrl+P, or double-click it in the list)")
-        self.play_btn.clicked.connect(lambda: on_start and self.item_id and on_start(
-            list(self.item.members) if self.item is not None and self.item.members else [self.item_id]))
+        self.play_btn.setToolTip(PLAY_TIP)
+        self.play_ids = []           # what Play starts: the item, its set, or a good copy of an empty disk
+        self.play_btn.clicked.connect(lambda: on_start and self.play_ids and on_start(list(self.play_ids)))
         buttons.insertWidget(0, self.play_btn)
         self.copy_btn = QPushButton("Copy to Gotek stick")
         self.copy_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
@@ -1170,6 +1224,12 @@ class DetailsPanel(QFrame):
         self.copy_btn.clicked.connect(lambda: on_copy and self.item_id and on_copy(
             list(self.item.members) if self.item is not None and self.item.members else [self.item_id]))
         buttons.addWidget(self.copy_btn)
+        self.recheck_btn = QPushButton("Recheck")
+        self.recheck_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
+        self.recheck_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.recheck_btn.setToolTip(RECHECK_TIP)
+        self.recheck_btn.clicked.connect(lambda: self.on_recheck and self.on_recheck())
+        buttons.addWidget(self.recheck_btn)
         v.addLayout(buttons)
         v.addStretch(1)
         scroll = QScrollArea()
@@ -1196,6 +1256,17 @@ class DetailsPanel(QFrame):
             out += rows
             todo = [r["id"] for r in rows]
         return out
+
+    def _playable_version(self, item):
+        """Another version or copy of this disk that has a real floppy image in it, or None."""
+        others = list(item.other_versions) + ([item.version_of] if item.version_of else []) + \
+            list(item.spares) + ([item.spare_of] if item.spare_of else [])
+        for oid in others:
+            rows = [self.cat.media_by_id(oid)] + self._descendants(oid)
+            if any(r is not None and r["kind"] in gotek.FLOPPY_KINDS and r["status"] != "empty"
+                   and r["size"] for r in rows):
+                return oid
+        return None
 
     def _cover_note(self, item, m):
         """What is known about a coverdisk: its magazine, issue and disk, and how sure that is."""
@@ -1381,7 +1452,25 @@ class DetailsPanel(QFrame):
         self.copy_btn.setVisible(floppy and not m["whd_name"])
         ipf = item.game and bool(self.cat.db.execute(
             "SELECT 1 FROM files WHERE media_id=? AND lower(path) LIKE '%.ipf' LIMIT 1", (m["id"],)).fetchone())
-        self.play_btn.setVisible(floppy or ipf or (bool(m["whd_name"]) and kind == "lha"))
+        playable = floppy or ipf or (bool(m["whd_name"]) and kind == "lha")
+        self.play_ids = list(item.members) if item.members else [m["id"]]
+        play_text, play_tip, play_on = "Play in emulator", PLAY_TIP, True
+        if not playable and item.cover is not None:
+            # An empty copy of a coverdisk: play another copy of the same disk if there is a good one.
+            other = self._playable_version(item)
+            if other:
+                self.play_ids, playable = [other], True
+                play_text = "Play a good copy"
+                play_tip = (f"This file is empty; #{self.cat.media_by_id(other)['number']:04d} is a good "
+                            "copy of the same disk, and Play starts that one")
+            elif m["status"] == "empty" or not m["size"]:
+                playable, play_on = True, False
+                play_tip = ("This file is empty (0 bytes), so there is no disk to play, and no other copy "
+                            "of it is catalogued")
+        self.play_btn.setText(play_text)
+        self.play_btn.setToolTip(play_tip)
+        self.play_btn.setEnabled(play_on)
+        self.play_btn.setVisible(playable)
         # An archive holding one disk image is described by that disk.
         d = m
         direct = [k for k in kids if k["parent_id"] == m["id"]]
@@ -1719,7 +1808,13 @@ class DetailsPanel(QFrame):
     def _show_picture(self, item):
         if item.pic and os.path.exists(item.pic):
             self.picture.set_picture(item.pic)
-            if item.pic_origin == "online":
+            if item.pic_origin == "cover":
+                ident, _, title = item.pic_from.partition("|")
+                self.pic_caption.setText(
+                    f"The cover of the magazine it came with, from its scan on the "
+                    f"<a href='{magcovers.DETAILS.format(id=ident)}'>Internet Archive</a> "
+                    f"(“{_esc(title)}”). © its publisher; kept on this computer for your own use.")
+            elif item.pic_origin == "online":
                 path, _, name = item.pic_from.partition("|")
                 kind = {"Named_Titles": "Title screen", "Named_Snaps": "Screenshot",
                         "Named_Boxarts": "Box art"}.get(path.split("/")[0], "Picture")
@@ -1758,14 +1853,32 @@ class ScanWorker(QThread):
     """Runs a scan or rescan with its own database connection, off the window's thread."""
     line = Signal(str)
     step = Signal(str, int, int, object, object, str)   # phase, done, total, bytes done, bytes total, path
+    big_found = Signal(list, float)     # big archives to ask about: [(path, kind, size)], bytes a second
     done = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, db_path, folders=None):
+    def __init__(self, db_path, folders=None, files=None):
         super().__init__()
         self.db_path = db_path
         self.folders = folders       # None = rescan everything scanned before
+        self.files = files           # recheck just these items' files (and their folders)
         self.stop_wanted = False
+        self.big_answer = []
+        self._answered = threading.Event()
+
+    def _confirm_big(self, big, rate):
+        """Ask the window which big archives to read, and wait for the answer."""
+        self._answered.clear()
+        self.big_answer = []
+        self.big_found.emit(big, rate)
+        while not self._answered.wait(0.2):
+            if self.stop_wanted:
+                raise ScanStopped()
+        return self.big_answer
+
+    def answer_big(self, paths):
+        self.big_answer = list(paths)
+        self._answered.set()
 
     def _progress(self, text):
         self.line.emit(text)
@@ -1781,10 +1894,15 @@ class ScanWorker(QThread):
         cat = None
         try:
             cat = Catalogue(self.db_path)
-            if self.folders is None:
-                s = rescan_all(cat, progress=self._progress, step=self._step)
+            if self.files is not None:
+                s = recheck(self.files, cat, progress=self._progress, step=self._step,
+                            confirm_big=self._confirm_big)
+            elif self.folders is None:
+                s = rescan_all(cat, progress=self._progress, step=self._step,
+                               confirm_big=self._confirm_big)
             else:
-                s = scan(self.folders, cat, progress=self._progress, step=self._step)
+                s = scan(self.folders, cat, progress=self._progress, step=self._step,
+                         confirm_big=self._confirm_big)
                 s["removed"] = []
             self.done.emit(s)
         except ScanStopped:
@@ -2078,16 +2196,29 @@ class PictureWorker(QThread):
                     pass
                 except Exception as ex:
                     res["identify_error"] = str(ex)
-            known = {k: v[0] for k, v in identify.for_catalogue(cat).items()}
+            known_full = identify.for_catalogue(cat)
+            known = {k: v[0] for k, v in known_full.items()}
             res["identified"] = len(known)
             res["disk"] = pictures.build(
-                cat, lambda i, n, m: self.progress.emit("disk", i, n, name(m)), stop)
+                cat, lambda i, n, m, inner=None: self.progress.emit(
+                    "disk", i, n, name(m)) if inner is None else self.progress.emit(
+                    "disk-inside", inner[0], inner[1], f"{name(m)}\t{inner[2]}"), stop)
             if not self.stop_wanted:
                 res["lengths"] = pictures.measure_music(
                     cat, lambda i, n, m: self.progress.emit("lengths", i, n, ""), stop)
             if self.online and not self.stop_wanted:
                 res["online"] = pictures.lookup_online(
                     cat, lambda i, n, m: self.progress.emit("online", i, n, name(m)), stop, known=known)
+            if self.online and not self.stop_wanted:
+                # magazine covers for coverdisks, from the scans on the Internet Archive
+                issues = []
+                for m in cat.db.execute("SELECT id, source FROM media WHERE parent_id IS NULL"):
+                    cd = coverdisks.recognise(m["source"], known_full.get(m["id"]))
+                    if cd is not None and cd.magazine and cd.issue:
+                        issues.append((cd.magazine, magcovers.issue_key(cd.issue)))
+                if issues:
+                    res["covers"] = magcovers.lookup(
+                        cat, issues, lambda i, n, w: self.progress.emit("covers", i, n, w), stop)
             if not self.stop_wanted:          # keep the Amiga's copy of the catalogue up to date
                 try:
                     folder = cat.get_meta("turboview_dir") or turboview.default_folder()
@@ -2114,6 +2245,9 @@ class PlayDialog(QDialog):
         self.files, self.whdload, skipped, names = emulator.disk_files(cat, ids)
         self.roms = emulator.find_kickstarts()
         guess = emulator.guess_model(names)
+        # A disk with no boot block was opened from Workbench: start a Workbench disk first
+        self.boots = True if self.whdload or not self.files else emulator.first_disk_boots(cat, ids)
+        self.workbenches = emulator.find_workbenches(cat) if self.files and not self.whdload else []
 
         v = QVBoxLayout(self)
         v.setContentsMargins(24, 22, 24, 20)
@@ -2122,15 +2256,11 @@ class PlayDialog(QDialog):
         head = QLabel(_esc(re.split(r"\s*[\(\[]", title, maxsplit=1)[0]) if names else title)
         head.setFont(ui_font(20, QFont.Weight.Bold))
         v.addWidget(head)
-        if self.whdload:
-            what = "WHDLoad game, started by Amiberry's WHDLoad booter"
-        else:
-            n = len(self.files)
-            what = (f"{n} disk{'s' if n != 1 else ''}: the first in DF0:"
-                    + (", the second in DF1:, all of them in the disk swapper" if n > 1 else ""))
-        v.addWidget(_wrap_label(what, ui_font(13), "muted"))
+        self.what = _wrap_label("", ui_font(13), "muted")
+        v.addWidget(self.what)
+        self.disk_list = None
         if self.files:
-            lst = QListWidget()
+            lst = self.disk_list = QListWidget()
             lst.setObjectName("diskList")
             lst.setFont(ui_font(13))
             lst.setIconSize(QSize(16, 16))
@@ -2138,14 +2268,35 @@ class PlayDialog(QDialog):
             lst.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             lst.setTextElideMode(Qt.TextElideMode.ElideMiddle)
             lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            for i, f in enumerate(self.files):
-                drive = f"DF{i}:  " if i < 2 else "swap:  "
-                it = QListWidgetItem(drive + os.path.basename(f))
-                it.setIcon(QIcon(icon("disk", 16)))
-                it.setToolTip(f)
-                lst.addItem(it)
-            lst.setFixedHeight(min(len(self.files), 6) * (max(lst.sizeHintForRow(0), 20) + 6) + 12)
             v.addWidget(lst)
+        self.wb_check = self.wb_box = None
+        if self.files and not self.whdload:
+            if self.workbenches:
+                row = QHBoxLayout()
+                row.setSpacing(10)
+                self.wb_check = QCheckBox("Start Workbench first")
+                self.wb_check.setFont(ui_font(13, QFont.Weight.DemiBold))
+                self.wb_check.setToolTip("Workbench starts from DF0: and these disks go in DF1: (and the "
+                                         "disk swapper), so their icons are on the Workbench screen. For "
+                                         "disks that were opened from Workbench rather than started.")
+                self.wb_box = QComboBox()
+                self.wb_box.setFont(ui_font(13))
+                for mid, label, major in self.workbenches:
+                    self.wb_box.addItem(label, (mid, major))
+                row.addWidget(self.wb_check)
+                row.addWidget(self.wb_box, 1)
+                v.addLayout(row)
+                self.wb_check.setChecked(self.boots is False)
+                self.wb_check.toggled.connect(self._wb_changed)
+                self.wb_box.currentIndexChanged.connect(self._wb_changed)
+            if self.boots is False:
+                v.addWidget(_wrap_label(
+                    "This disk doesn't start by itself (it has no boot block): it was opened from "
+                    "Workbench. " + ("TurboCAT starts Workbench first, with it in DF1: — open it by "
+                                     "double-clicking its icon." if self.workbenches else
+                                     "No Workbench disk is catalogued. Scan the folder with your "
+                                     "Workbench disks (from Amiga Forever, or your own) and Play will "
+                                     "start Workbench first."), ui_font(12), "muted"))
         if skipped:
             v.addWidget(_wrap_label("Left out: " + "; ".join(f"{n} ({w})" for n, w in skipped[:4]),
                                     ui_font(12), "muted"))
@@ -2199,6 +2350,7 @@ class PlayDialog(QDialog):
         v.addWidget(self.rom_note)
         self.model_box.currentIndexChanged.connect(self._rom_text)
         self._rom_text()
+        self._wb_changed()
 
         btns = QHBoxLayout()
         btns.addStretch(1)
@@ -2215,6 +2367,45 @@ class PlayDialog(QDialog):
             btns.addWidget(b)
         v.addLayout(btns)
 
+    def _drive_files(self):
+        """The files in drive order: Workbench first if it is to start first."""
+        if self.wb_check is not None and self.wb_check.isChecked():
+            return ["(Workbench)"] + self.files
+        return list(self.files)
+
+    def _wb_changed(self, *_):
+        files = self._drive_files()
+        wb = files[:1] == ["(Workbench)"]
+        if self.whdload:
+            what = "WHDLoad game, started by Amiberry's WHDLoad booter"
+        elif wb:
+            what = ("Workbench in DF0:, " + ("the disk in DF1:" if len(self.files) == 1 else
+                    "the first disk in DF1:, all of them in the disk swapper"))
+        else:
+            n = len(self.files)
+            what = (f"{n} disk{'s' if n != 1 else ''}: the first in DF0:"
+                    + (", the second in DF1:, all of them in the disk swapper" if n > 1 else ""))
+        self.what.setText(what)
+        if self.wb_box is not None:
+            self.wb_box.setEnabled(wb)
+        if wb:
+            # Workbench 3.1 needs Kickstart 3.1: move up to an Amiga that has it
+            major = self.wb_box.currentData()[1]
+            mdl = emulator.model_for_workbench(major, self.model_box.currentData())
+            self.model_box.setCurrentIndex(emulator.MODELS.index(mdl))
+        lst = self.disk_list
+        if lst is None:
+            return
+        lst.clear()
+        for i, f in enumerate(files):
+            drive = f"DF{i}:  " if i < 2 else "swap:  "
+            name = self.wb_box.currentText().split("  ·  ")[0] if f == "(Workbench)" else os.path.basename(f)
+            it = QListWidgetItem(drive + name)
+            it.setIcon(QIcon(icon("disk", 16)))
+            it.setToolTip(self.wb_box.currentText() if f == "(Workbench)" else f)
+            lst.addItem(it)
+        lst.setFixedHeight(min(len(files), 6) * (max(lst.sizeHintForRow(0), 20) + 6) + 12)
+
     def _rom_text(self):
         mdl = self.model_box.currentData()
         rom = self.roms.get(mdl)
@@ -2228,8 +2419,15 @@ class PlayDialog(QDialog):
         display = self.display_box.currentData()
         self.cat.set_meta("emulator", emu)
         self.cat.set_meta("emulator_display", display)
-        cmd = emulator.command(emu, self.emulators[emu], mdl, self.roms.get(mdl), self.files,
-                               self.whdload, display=display)
+        files = self.files
+        if self.wb_check is not None and self.wb_check.isChecked():
+            try:
+                files = [emulator.workbench_file(self.cat, self.wb_box.currentData()[0])] + files
+            except Exception as ex:
+                QMessageBox.warning(self, "Play in emulator", f"The Workbench disk couldn't be read: {ex}")
+                return
+        cmd = emulator.command(emu, self.emulators[emu], mdl, self.roms.get(mdl), files,
+                               self.whdload, display=display, fast_floppy=files is not self.files)
         try:
             emulator.launch(cmd)
         except OSError as ex:
@@ -2896,7 +3094,8 @@ class MainWindow(QMainWindow):
                                "and your collection folders mounted as drives")
         self.online_btn = QPushButton("Find pictures online")
         self.online_btn.setToolTip("Look up title screens for disks that have no picture of their own, "
-                                   "in the libretro-thumbnails collection on GitHub")
+                                   "in the libretro-thumbnails collection on GitHub, and magazine covers for "
+                                   "coverdisks on the Internet Archive")
         for b in (self.scan_btn, self.rescan_btn, self.gotek_btn, self.online_btn, self.tv_btn):
             b.setFont(ui_font(14, QFont.Weight.DemiBold))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2918,8 +3117,7 @@ class MainWindow(QMainWindow):
         self.result_label.setObjectName("muted")
         self.result_label.setFont(ui_font(13))
         sl.addWidget(self.search)
-        chips = QHBoxLayout()
-        chips.setSpacing(8)
+        chips = FlowLayout(spacing=8)          # wraps onto a second line in a narrow window
         self.filter = "all"
         self.chips = {}
         self.chip_group = QButtonGroup(self)
@@ -2940,17 +3138,20 @@ class MainWindow(QMainWindow):
             self.chip_group.addButton(b)
             self.chips[key] = (b, label)
             chips.addWidget(b)
-        chips.addStretch(1)
         self.chips["all"][0].setChecked(True)
         sl.addLayout(chips)
         self.scan_bar = QFrame()
         self.scan_bar.setObjectName("scanBar")
-        sb = QHBoxLayout(self.scan_bar)
-        sb.setContentsMargins(12, 6, 8, 6)
+        bar_rows = QVBoxLayout(self.scan_bar)
+        bar_rows.setContentsMargins(12, 6, 8, 6)
+        bar_rows.setSpacing(6)
+        sb = QHBoxLayout()
         sb.setSpacing(12)
+        bar_rows.addLayout(sb)
         self.scan_busy = QProgressBar()
+        self.scan_busy.setObjectName("scanMeter")
         self.scan_busy.setRange(0, 0)
-        self.scan_busy.setFixedWidth(220)
+        self.scan_busy.setFixedWidth(260)
         self.scan_busy.setTextVisible(False)
         self.scan_text = QLabel()
         self.scan_text.setFont(ui_font(13, QFont.Weight.DemiBold))
@@ -2967,10 +3168,33 @@ class MainWindow(QMainWindow):
         sb.addWidget(self.scan_text)
         sb.addWidget(self.scan_file, 1)
         sb.addWidget(self.stop_btn)
+        # A second row while one big file is read: how far into it, and how long it has left.
+        self.sub_row = QWidget()
+        sr = QHBoxLayout(self.sub_row)
+        sr.setContentsMargins(0, 0, 4, 2)
+        sr.setSpacing(12)
+        self.sub_text = QLabel()
+        self.sub_text.setFont(ui_font(12, QFont.Weight.DemiBold))
+        self.sub_meter = QProgressBar()
+        self.sub_meter.setObjectName("scanMeter")
+        self.sub_meter.setRange(0, 1000)
+        self.sub_meter.setTextVisible(False)
+        self.sub_left = QLabel()
+        self.sub_left.setObjectName("scanFile")
+        self.sub_left.setFont(ui_font(12))
+        sr.addWidget(self.sub_text)
+        sr.addWidget(self.sub_meter, 1)
+        sr.addWidget(self.sub_left)
+        self.sub_row.hide()
+        bar_rows.addWidget(self.sub_row)
         self.scan_bar.hide()
         sl.addWidget(self.scan_bar)
         res_row = QHBoxLayout()
         res_row.setSpacing(8)
+        # long summaries wrap rather than widen the window
+        self.result_label.setWordWrap(True)
+        self.result_label.setMinimumWidth(120)
+        self.result_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         res_row.addWidget(self.result_label, 1)
         self.group_btn = QPushButton("Group sets and versions")
         self.group_btn.setObjectName("segment")
@@ -3102,6 +3326,9 @@ class MainWindow(QMainWindow):
                                     self.play_music, self.play_in_emulator)
         self.details.on_keep = self.keep_copy
         self.details.on_favourite = self.toggle_favourite
+        self.details.on_recheck = lambda: self.recheck_items(
+            list(self.details.item.members) if self.details.item is not None and self.details.item.members
+            else [self.details.item_id] if self.details.item_id else [])
         self.table.clicked.connect(self._row_clicked)
         self.tunes_table.clicked.connect(self._tune_clicked)
         self.tv_timer = QTimer(self, singleShot=True, interval=4000)
@@ -3132,14 +3359,14 @@ class MainWindow(QMainWindow):
         fl = QHBoxLayout(foot)
         fl.setContentsMargins(24, 10, 24, 10)
         fl.setSpacing(20)
-        self.foot_left = QLabel()
-        self.foot_right = QLabel(f"{APP_NAME} {VERSION} · {db_path}")
+        self.foot_left = ElidedLabel()
+        self.foot_right = ElidedLabel(f"{APP_NAME} {VERSION} · {db_path}")
         for lab in (self.foot_left, self.foot_right):
             lab.setObjectName("muted")
             lab.setFont(ui_font(12))
-        fl.addWidget(self.foot_left)
-        fl.addStretch(1)
-        fl.addWidget(self.foot_right)
+        self.foot_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        fl.addWidget(self.foot_left, 1)
+        fl.addWidget(self.foot_right, 1)
         v.addWidget(foot)
 
         self.setCentralWidget(root)
@@ -3231,10 +3458,11 @@ class MainWindow(QMainWindow):
                            "here and in TurboView")
         self.act_folder = add(m, "Show in &folder", self.show_selected_in_folder, "Ctrl+Shift+O",
                               "Open the folder holding the selected item")
+        self.act_recheck = add(m, "&Recheck", lambda: self.recheck_items(), "Shift+F5", RECHECK_TIP)
 
         m = bar.addMenu("&Tools")
         self.act_online = add(m, "Find pictures &online", self.find_online, None,
-                              "Look up title screens in the libretro-thumbnails collection")
+                              "Look up title screens in the libretro-thumbnails collection, and magazine covers for coverdisks on the Internet Archive")
         self.act_identify = add(m, "&Identify disks online…", self.identify_online, None,
                                 "Find each disk's proper name from its checksum, in the TOSEC list of Amiga disks")
         add(m, "&Rename files to their proper names…", self.rename_to_tosec, None,
@@ -3249,6 +3477,23 @@ class MainWindow(QMainWindow):
         add(m, f"&About {APP_NAME}", self.show_about, "F1")
         add(m, f"{APP_NAME} on &GitHub", lambda: QDesktopServices.openUrl(QUrl(AboutDialog.REPO)))
         self._selection_changed()
+        # Right-click on the list: the Disk menu's commands for what is selected
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._list_menu)
+
+    def _list_menu(self, pos):
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        if not self.table.selectionModel().isRowSelected(index.row(), QModelIndex()):
+            self.table.selectRow(index.row())
+        menu = QMenu(self)
+        for a in (self.act_play, self.act_recheck, self.act_folder, None, self.act_gotek, self.act_fav):
+            if a is None:
+                menu.addSeparator()
+            else:
+                menu.addAction(a)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def show_selected_in_folder(self):
         ids = self.selected_ids()
@@ -3274,8 +3519,9 @@ class MainWindow(QMainWindow):
             tunes = bool(chosen) and all(it.type == "Module" for it in chosen)
             self.act_play.setText("&Play tune" if tunes else "&Play in emulator")
             self.act_gotek.setText(f"Copy {n:,} to &Gotek stick…" if n > 1 else "Copy to &Gotek stick…")
-            for a in (self.act_play, self.act_gotek, self.act_folder):
+            for a in (self.act_play, self.act_gotek, self.act_folder, self.act_recheck):
                 a.setEnabled(bool(ids))
+            self.act_recheck.setText(f"&Recheck {n:,} items" if n > 1 else "&Recheck")
             self.act_fav.setText("Remove from &favourites" if chosen and all(c.favourite for c in chosen)
                                  else "Add to &favourites")
 
@@ -3482,6 +3728,11 @@ class MainWindow(QMainWindow):
             if rows:
                 self.player_bar.play(rows, 0, labels=labels)
             return
+        if len(chosen) == 1 and self.details.item is chosen[0] and self.details.play_ids:
+            if not self.details.play_btn.isEnabled():       # an empty file with no good copy
+                self.result_label.setText(self.details.play_btn.toolTip())
+                return
+            ids = self.details.play_ids                     # e.g. a good copy of an empty coverdisk
         self.play_in_emulator(ids)
 
     def play_in_emulator(self, ids=None):
@@ -3560,7 +3811,8 @@ class MainWindow(QMainWindow):
         """Show each chip's count within the current search; hide empty ones.
         matched: what the list shows (spares hidden); everything: spares too."""
         for key, (b, label) in self.chips.items():
-            hits = [it for it in matched if FILTER_TEST[key](it)]
+            hits = [it for it in matched if FILTER_TEST[key](it)
+                    and (key == "empty" or it.status != "empty")]   # empty files: only under Empty
             if key == "dups":
                 n = len({it.dup_key for it in (everything or matched) if it.copies > 1})
                 b.setText(f"{label}  {n:,}")
@@ -3588,7 +3840,27 @@ class MainWindow(QMainWindow):
         self._start_scan(None, f"Rescanning {len(roots)} folder{'s' if len(roots) > 1 else ''}…")
         self.scan_bar.setToolTip("Rescanning:\n" + "\n".join(roots))
 
-    def _start_scan(self, folders, text):
+    def recheck_items(self, ids=None):
+        """Disk > Recheck: read the chosen items again, and look in their folders for disks
+        replaced, added or deleted, without rescanning every folder."""
+        ids = ids if ids is not None else self._expand(self.selected_ids())
+        files = []
+        for i in ids:
+            m = self.cat.media_by_id(i)
+            while m is not None and m["parent_id"]:
+                m = self.cat.media_by_id(m["parent_id"])
+            if m is not None and m["source"] not in files:
+                files.append(m["source"])
+        if not files:
+            return
+        folders = sorted({os.path.dirname(f) for f in files})
+        what = (os.path.basename(files[0]) if len(files) == 1 else f"{len(files)} files")
+        self.recheck_focus = files
+        self._start_scan(None, f"Rechecking {what}…", files=files)
+        self.scan_bar.setToolTip("Rechecking, and looking for new, changed and deleted files in:\n"
+                                 + "\n".join(folders))
+
+    def _start_scan(self, folders, text, files=None):
         if self.worker is not None:
             return
         self.hide_bar.stop()
@@ -3597,6 +3869,8 @@ class MainWindow(QMainWindow):
         self.bar_mode = "scan"
         self.scan_busy.setRange(0, 0)          # busy until the first progress report
         self.read_started = None
+        self.read_file = None            # the file being read: (bytes before it, its size, started)
+        self.sub_row.hide()
         self.scan_busy.show()
         self.stop_btn.show()
         self.stop_btn.setEnabled(True)
@@ -3605,11 +3879,14 @@ class MainWindow(QMainWindow):
         self.act_scan.setEnabled(False)
         self.rescan_btn.setEnabled(False)
         self.act_rescan.setEnabled(False)
+        self.details.recheck_btn.setEnabled(False)
         self.found_count = 0
         self.stop_pictures()
-        self.worker = ScanWorker(self.db_path, folders)
+        self.worker = ScanWorker(self.db_path, folders, files)
+        self.rechecking = files is not None
         self.worker.line.connect(self._scan_line)
         self.worker.step.connect(self._scan_step)
+        self.worker.big_found.connect(self._ask_big)
         self.worker.done.connect(self._scan_done)
         self.worker.failed.connect(self._scan_failed)
         self.worker.finished.connect(self._scan_finished)
@@ -3638,17 +3915,97 @@ class MainWindow(QMainWindow):
             self.found_count += 1
 
     @staticmethod
-    def _time_left(seconds):
+    def _about(seconds):
+        """'less than a minute', 'about 5 min', 'about 1 h 20 min'."""
         if seconds < 60:
-            return "less than a minute left"
+            return "less than a minute"
         minutes = int(seconds // 60) + 1
         if minutes < 90:
-            return f"about {minutes} min left"
-        return f"about {minutes // 60} h {minutes % 60} min left"
+            return f"about {minutes} min"
+        return f"about {minutes // 60} h {minutes % 60} min"
+
+    @classmethod
+    def _time_left(cls, seconds):
+        return cls._about(seconds) + " left"
+
+    def _ask_big(self, big, rate):
+        """Before a scan reads them: list the big archives found, say how long each will take,
+        and let the user untick any to leave for now."""
+        worker = self.worker
+        if worker is None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Big archives found")
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(12)
+        n = len(big)
+        head = QLabel(f"{'These archives are' if n > 1 else 'This archive is'} big")
+        head.setFont(ui_font(16, QFont.Weight.DemiBold))
+        v.addWidget(head)
+        intro = QLabel(
+            f"TurboCAT opens every disk and archive inside {'an archive' if n > 1 else 'it'}, so "
+            f"reading {'one this big' if n > 1 else 'it'} takes minutes, and the rest of the scan "
+            f"waits until it is done. Untick any you'd rather leave for now: they are left out of "
+            f"the catalogue this time, and the next scan asks again. You can stop a scan at any "
+            f"time; an archive stopped part way through is left out too.")
+        intro.setWordWrap(True)
+        intro.setFixedWidth(560)                 # so its height is worked out for this width
+        v.addWidget(intro)
+        boxes = QWidget()
+        bl = QVBoxLayout(boxes)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(6)
+        checks = []
+        for path, kind, size in big:
+            cb = QCheckBox(f"{os.path.basename(path)}  ·  {size / (1 << 20):,.0f} MB  ·  "
+                           f"{self._about(size / rate)}")
+            cb.setChecked(True)
+            cb.setToolTip(path)
+            bl.addWidget(cb)
+            checks.append((cb, path, size))
+        if n > 8:
+            area = QScrollArea()
+            area.setWidget(boxes)
+            area.setWidgetResizable(True)
+            area.setMinimumHeight(220)
+            v.addWidget(area)
+        else:
+            v.addWidget(boxes)
+        total = QLabel()
+        total.setObjectName("muted")
+        v.addWidget(total)
+
+        def count():
+            ticked = [sz for cb, _p, sz in checks if cb.isChecked()]
+            total.setText(f"Ticked: {len(ticked)} of {n}, {self._about(sum(ticked) / rate)} to read"
+                          if ticked else "None ticked: all of them are left for now")
+        for cb, _p, _s in checks:
+            cb.toggled.connect(lambda _=False: count())
+        count()
+        row = QHBoxLayout()
+        row.addStretch(1)
+        skip = QPushButton("Leave them all for now" if n > 1 else "Leave it for now")
+        go = QPushButton("Scan the ticked ones" if n > 1 else "Scan it")
+        go.setObjectName("primary")
+        go.setDefault(True)
+        skip.clicked.connect(dlg.reject)        # closing the window leaves them too
+        go.clicked.connect(dlg.accept)
+        row.addWidget(skip)
+        row.addWidget(go)
+        v.addLayout(row)
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        worker.answer_big([p for cb, p, _s in checks if ok and cb.isChecked()])
 
     def _scan_step(self, phase, done, total, done_bytes, total_bytes, path):
         if self.worker is None or self.worker.stop_wanted:
             return
+        if phase.startswith("inside"):
+            self._inside_step(phase, done, total, done_bytes, total_bytes, path)
+            return
+        if phase == "reading":
+            self.read_file = (done, total, done_bytes, total_bytes, time.monotonic())
+            self.sub_row.hide()
         self.scan_busy.setRange(0, 1000)
         if phase == "checking":
             self.scan_busy.setValue(int(1000 * done / total) if total else 0)
@@ -3669,33 +4026,103 @@ class MainWindow(QMainWindow):
                     rate = (done_bytes - b0) / elapsed
                     text += " · " + self._time_left((total_bytes - done_bytes) / rate)
                 self.scan_text.setText(text)
-        name = os.path.basename(path) if path else ""
+        # "outer.zip › inner.zip › disk.adf": the file, then where it has got to inside it
+        name = " › ".join(os.path.basename(x.rstrip("/")) for x in path.split(" › ")) if path else ""
         fm = QFontMetrics(self.scan_file.font())
         self.scan_file.setText(fm.elidedText(name, Qt.TextElideMode.ElideMiddle,
                                              max(40, self.scan_file.width())))
         self.scan_file.setToolTip(path)
 
+    def _inside_step(self, phase, done, total, file_done, file_size, path):
+        """Progress inside one file: the main bar moves on through it, and for a big one (or
+        one that is taking a while) a second bar shows how far into it the scan has got."""
+        if self.read_file is None:
+            return
+        i, n, before, all_bytes, started = self.read_file
+        self._scan_step_main(i, n, before + file_done, all_bytes)
+        outer, _, inner = path.partition(" › ")
+        name = os.path.basename(outer)
+        elapsed = time.monotonic() - started
+        if file_size < BIG_ARCHIVE // 4 and elapsed < 3:
+            return
+        frac = file_done / file_size if file_size else 0
+        self.sub_meter.setValue(int(1000 * frac))
+        if phase == "inside-load":
+            self.sub_meter.setValue(int(1000 * done / total) if total else 0)   # how much has loaded
+            self.sub_text.setText(f"Loading {name}: {done:,} of {total:,} MB")
+        else:
+            what = "files listed" if phase == "inside-read" else "opened"
+            self.sub_text.setText(f"Inside {name}: {done:,} of {total:,} {what}")
+        left = ""
+        if elapsed >= 5 and frac > 0.02:
+            left = self._time_left(elapsed * (1 - frac) / frac) + " for this file"
+        self.sub_left.setText(left)
+        self.sub_row.show()
+        inner_name = " › ".join(os.path.basename(x.rstrip("/")) for x in inner.split(" › ")) if inner else name
+        fm = QFontMetrics(self.scan_file.font())
+        self.scan_file.setText(fm.elidedText(inner_name, Qt.TextElideMode.ElideMiddle,
+                                             max(40, self.scan_file.width())))
+        self.scan_file.setToolTip(path)
+
+    def _scan_step_main(self, done, total, done_bytes, total_bytes):
+        """The main bar and its words, part way through a file."""
+        frac = done_bytes / total_bytes if total_bytes else 0
+        self.scan_busy.setRange(0, 1000)
+        self.scan_busy.setValue(int(1000 * frac))
+        text = f"Reading {min(done + 1, total):,} of {total:,} new or changed · {frac:.0%}"
+        if self.read_started is not None:
+            t0, b0 = self.read_started
+            elapsed = time.monotonic() - t0
+            if elapsed >= 3 and done_bytes > b0:
+                rate = (done_bytes - b0) / elapsed
+                text += " · " + self._time_left((total_bytes - done_bytes) / rate)
+        self.scan_text.setText(text)
+
     def _scan_done(self, s):
         if s.get("stopped"):
             msg = f"Scan stopped. {self.found_count:,} new or changed item(s) were added first."
         else:
-            bits = [f"{s.get('scanned', 0):,} new or changed", f"{s.get('skipped', 0):,} unchanged"]
+            if getattr(self, "rechecking", False):
+                bits = [f"{s.get('scanned', 0):,} read again or new",
+                        f"{s.get('skipped', 0):,} other file{'' if s.get('skipped', 0) == 1 else 's'} "
+                        f"in the folder unchanged"]
+            else:
+                bits = [f"{s.get('scanned', 0):,} new or changed", f"{s.get('skipped', 0):,} unchanged"]
             if s.get("removed"):
                 bits.append(f"{len(s['removed']):,} removed (files deleted)")
             if s.get("missing"):
                 bits.append(f"{len(s['missing'])} folder(s) not found")
-            msg = "Scan finished: " + ", ".join(bits) + "."
+            msg = ("Recheck finished: " if getattr(self, "rechecking", False) else "Scan finished: ") \
+                + ", ".join(bits) + "."
+            if s.get("held_back"):
+                n = len(s["held_back"])
+                msg += (f" {n} big archive{'s were' if n > 1 else ' was'} left for now; "
+                        f"the next scan offers {'them' if n > 1 else 'it'} again.")
         self._show_result(msg)
 
     def _scan_failed(self, err):
         self._show_result(f"Scan failed: {err}")
 
     def _show_result(self, msg):
+        self.sub_row.hide()
         self.scan_text.setText(msg)
         self.scan_file.setText("")
         self.scan_busy.hide()
         self.stop_btn.hide()
         self.reload()
+        if getattr(self, "rechecking", False) and getattr(self, "recheck_focus", None):
+            self._select_paths(self.recheck_focus)    # back on what was rechecked (it has new ids)
+            self.recheck_focus = None
+
+    def _select_paths(self, paths):
+        """Select the row (a disk, or the set it belongs to) for the first of these files."""
+        paths = set(paths)
+        by_id = {it.id: it for it in self.all_items}
+        for row, it in enumerate(self.model.items):
+            mine = [it.path] + [by_id[i].path for i in (it.members or []) if i in by_id]
+            if paths & set(mine):
+                self._select_row(row)
+                return
         self.hide_bar.start()
 
     def _live_reload(self):
@@ -3709,6 +4136,7 @@ class MainWindow(QMainWindow):
         self.act_scan.setEnabled(True)
         self.rescan_btn.setEnabled(True)
         self.act_rescan.setEnabled(True)
+        self.details.recheck_btn.setEnabled(True)
         if not self.closing:
             self.find_pictures()
 
@@ -3794,7 +4222,9 @@ class MainWindow(QMainWindow):
             box.setInformativeText(
                 "TurboCAT matches each disk's title against the libretro-thumbnails collection "
                 "(the pictures RetroArch uses), on GitHub, and downloads a title screen when the "
-                "name matches exactly.\n\nThese pictures belong to the games' publishers. They "
+                "name matches exactly. For magazine coverdisks it fetches the cover of the issue "
+                "from the magazine scans on the Internet Archive (only the magazine's name is "
+                "searched for).\n\nThese pictures belong to their publishers. They "
                 "are kept on this computer for your own use. After this, new disks are looked up "
                 "automatically after each scan.")
             box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
@@ -3836,6 +4266,21 @@ class MainWindow(QMainWindow):
         self.scan_bar.show()
 
     def _pic_progress(self, phase, i, n, what=""):
+        if phase == "disk-inside":
+            # a big item (an archive of a thousand disks): how far through what's inside it
+            outer, _, inner = what.partition("\t")
+            if not self.pic_shown:
+                self._pic_bar("Looking for pictures and music on disks…", 0, 0, outer)
+            self.sub_meter.setValue(int(1000 * i / n) if n else 0)
+            self.sub_text.setText(f"Inside {outer}: {i:,} of {n:,}")
+            self.sub_left.setText("")
+            fm = QFontMetrics(self.scan_file.font())
+            self.scan_file.setText(fm.elidedText(f"{outer} › {inner}", Qt.TextElideMode.ElideMiddle,
+                                                 max(40, self.scan_file.width())))
+            self.sub_row.show()
+            return
+        if phase != "identify":
+            self.sub_row.hide()
         if phase == "identify":
             size = f"{i / 1024:.1f} of {n / 1024:.1f} MB" if n else ""
             if what == "tosec":
@@ -3853,7 +4298,8 @@ class MainWindow(QMainWindow):
             return
         text = {"disk": "Looking for pictures and music on disks…",
                 "lengths": "Measuring tunes…",
-                "online": "Looking for pictures online…"}[phase]
+                "online": "Looking for pictures online…",
+                "covers": "Looking for magazine covers on the Internet Archive…"}[phase]
         self._pic_note(f"{text} {i:,} of {n:,}")
         # Little jobs in the background stay in the footer; anything bigger, or anything the
         # user asked for, gets the progress bar.
@@ -3875,7 +4321,12 @@ class MainWindow(QMainWindow):
             n, looked = res["online"]["found"], res["online"]["looked"]
             bits.append(f"{n:,} picture{'' if n == 1 else 's'} found online for "
                         f"{looked:,} disk{'' if looked == 1 else 's'} looked up")
-        if res.get("online", {}).get("stopped"):
+        if res.get("covers", {}).get("looked"):
+            n, looked = res["covers"]["found"], res["covers"]["looked"]
+            bits.append(f"{n:,} magazine cover{'' if n == 1 else 's'} found for "
+                        f"{looked:,} issue{'' if looked == 1 else 's'} with coverdisks")
+        if res.get("online", {}).get("stopped") or res.get("covers", {}).get("stopped") \
+                or res["disk"].get("stopped"):
             bits.insert(0, "Stopped")
         if self.pic_shown and "online" in res and not res["online"]["looked"] \
                 and not res["online"].get("stopped"):
@@ -3888,6 +4339,7 @@ class MainWindow(QMainWindow):
             self._pic_bar_end(_cap(" · ".join(bits)) if bits else "Finished: nothing new found")
 
     def _pic_bar_end(self, text):
+        self.sub_row.hide()
         self.scan_busy.setRange(0, 1)
         self.scan_busy.setValue(1)
         self.scan_text.setText(text)
@@ -4054,7 +4506,7 @@ class MainWindow(QMainWindow):
             self.versions_hidden = before - len(shown)
             shown = self._grouped(shown, text)
         self._fill_chips(shown, everything)
-        matched = len(shown)
+        matched = sum(1 for it in shown if it.status != "empty" or self.filter == "empty")
         test = FILTER_TEST[self.filter]
         if self.filter == "dups":
             # Each set together: the copy kept, then its spares.
@@ -4066,6 +4518,12 @@ class MainWindow(QMainWindow):
                            key=lambda it: (first[it.dup_key], bool(it.spare_of), it.number))
         else:
             shown = [it for it in shown if test(it)]
+        # Empty files (0 bytes: nothing to read or play) are listed under the Empty chip only
+        empty_hidden = 0
+        if self.filter not in ("empty", "dups"):
+            before = len(shown)
+            shown = [it for it in shown if it.status != "empty"]
+            empty_hidden = before - len(shown)
         label = dict((k, l) for k, l, _, _ in FILTERS)[self.filter]
         if self.filter == "music":
             label = "Items with music"
@@ -4093,6 +4551,9 @@ class MainWindow(QMainWindow):
                 f" · {_n(self.versions_hidden, 'other version')} hidden" if self.versions_hidden else "") + (
                 f" · {_n(self.spares_hidden, 'spare copy')} hidden (see Duplicates)"
                 .replace("copys", "copies") if self.spares_hidden else ""))
+        if empty_hidden:
+            self.result_label.setText(self.result_label.text() + f" · {_n(empty_hidden, 'empty file')} "
+                                      "hidden (see Empty)")
         keep = set(self.selected_ids()) if self.model.items else set()
         self.model.set_items(shown)
         if shown:
@@ -4317,6 +4778,8 @@ class MainWindow(QMainWindow):
             #scanBar QLabel#scanFile {{ color: {c['ink-muted']}; }}
             QProgressBar {{ border: none; background: {c['surface']}; border-radius: 3px; max-height: 6px; }}
             QProgressBar::chunk {{ background: {c['accent']}; border-radius: 3px; }}
+            QProgressBar#scanMeter {{ min-height: 10px; max-height: 10px; border-radius: 5px; }}
+            QProgressBar#scanMeter::chunk {{ border-radius: 5px; }}
             QScrollBar:vertical {{ background: {c['surface']}; width: 12px; margin: 0; }}
             QScrollBar:horizontal {{ background: {c['surface']}; height: 12px; margin: 0; }}
             QScrollBar::handle:horizontal {{ background: {c['line']}; border-radius: 4px; min-width: 30px;

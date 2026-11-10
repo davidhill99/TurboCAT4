@@ -306,6 +306,75 @@ def disk_files(cat, top_ids, whole_sets=True):
     return files, None, skipped, names
 
 
+# ---------------------------------------------------------------- Workbench first
+
+# Some disks don't start by themselves (no boot block: "DOS, not bootable"): they were opened from
+# Workbench. Play can start a Workbench disk from the collection in DF0: with them in DF1:.
+WB_MODEL = {1: "A500", 2: "A600", 3: "A1200"}      # the smallest Amiga each Workbench runs on
+
+
+def _boots(m):
+    return m is not None and (m["boot_kind"] or "").startswith(("standard", "custom"))
+
+
+def first_disk_boots(cat, top_ids):
+    """True if the disk Play puts in DF0: starts by itself (None if it can't tell)."""
+    tops = [cat.media_by_id(i) for i in top_ids]
+    tops = [t for t in tops if t is not None]
+    if not tops:
+        return None
+    if len(tops) == 1:
+        tops = set_members(cat, tops[0])
+    p = gotek.plan(cat, [tops[0]["id"]])
+    if not p.disks:
+        return None
+    m = cat.media_by_id(p.disks[0].media_id)
+    if m is None or m["kind"] not in ("adf", "adz", "dms"):
+        return None
+    return _boots(m)
+
+
+def wb_version(volume):
+    """'Workbench3.1' -> (3, '3.1'); 'Workbench 1.3' -> (1, '1.3'); else (None, '')."""
+    v = re.search(r"(\d)\.(\d+)", volume or "")
+    return (int(v.group(1)), f"{v.group(1)}.{v.group(2)}") if v else (None, "")
+
+
+def find_workbenches(cat):
+    """Catalogued Workbench disks that boot: [(media id, label, major version)], newest first,
+    plain files before ones inside archives."""
+    out = []
+    for m in cat.db.execute(
+            "SELECT * FROM media WHERE kind IN ('adf','adz','dms') AND status='ok' "
+            "AND lower(volume) LIKE 'workbench%' ORDER BY parent_id IS NOT NULL, id"):
+        if not _boots(m):
+            continue
+        if not cat.db.execute("SELECT 1 FROM files WHERE media_id=? AND lower(path)='c/loadwb'",
+                              (m["id"],)).fetchone():
+            continue
+        major, ver = wb_version(m["volume"])
+        if major is None:
+            continue                     # Commodore's disks are "Workbench1.3", "Workbench3.1"...
+        name = os.path.basename(m["inner_path"] or m["source"])
+        out.append((m["id"], f"Workbench {ver}".strip() + f"  ·  {name}", major or 0))
+    out.sort(key=lambda w: -w[2])
+    return out
+
+
+def workbench_file(cat, media_id):
+    """A file the emulator can read for this Workbench disk."""
+    m = cat.media_by_id(media_id)
+    if m["parent_id"] is None:
+        return m["source"]
+    return _cached(os.path.basename(m["inner_path"]), gotek.adf_bytes(cat, media_id))
+
+
+def model_for_workbench(major, model):
+    """The Amiga to use: `model`, or a newer one if this Workbench needs a later Kickstart."""
+    need = WB_MODEL.get(major or 1, "A500")
+    return need if MODELS.index(need) > MODELS.index(model) else model
+
+
 # ---------------------------------------------------------------- starting
 
 # How big the emulator shows the Amiga. The picture keeps the Amiga's shape (no stretching to
@@ -329,8 +398,11 @@ def display_args(emulator, display):
         return ["--fullscreen=1", "--fullscreen_mode=fullscreen-window", "--keep_aspect=1"]
     return []
 
-def command(emulator, base, model, rom, files, whdload=None, mounts=(), display="window"):
-    """The command line that starts `emulator` with these disks. mounts: [(volume, folder)]."""
+def command(emulator, base, model, rom, files, whdload=None, mounts=(), display="window",
+            fast_floppy=False):
+    """The command line that starts `emulator` with these disks. mounts: [(volume, folder)].
+    fast_floppy: drives faster than a real Amiga's (Workbench started from a floppy takes over a
+    minute at real speed; game loaders can mind, so only when asked)."""
     if emulator == "amiberry":
         cmd = list(base) + ["--model", model, "-G"]
         if rom:
@@ -341,9 +413,12 @@ def command(emulator, base, model, rom, files, whdload=None, mounts=(), display=
         for i, f in enumerate(files[:2]):
             cmd += [f"-{i}", f]
         if len(files) > 1:
+            cmd += ["-s", "floppy1type=0"]                 # a second drive, DF1:, for the second disk
             cmd.append("-diskswapper=" + ",".join(f'"{f}"' if "," in f else f for f in files))
         for vol, folder in mounts:
             cmd += ["-s", f"filesystem2=rw,{vol}:{vol}:{folder},-128"]
+        if fast_floppy:
+            cmd += ["-s", "floppy_speed=800"]
         return cmd
     cmd = list(base) + [f"--amiga_model={model}"] + display_args(emulator, display)
     if rom:
@@ -355,6 +430,8 @@ def command(emulator, base, model, rom, files, whdload=None, mounts=(), display=
     for i, (vol, folder) in enumerate(mounts):
         cmd += [f"--hard_drive_{i}={folder}", f"--hard_drive_{i}_label={vol}",
                 f"--hard_drive_{i}_priority=-128"]
+    if fast_floppy:
+        cmd.append("--floppy_drive_speed=0")              # 0: as fast as possible
     return cmd
 
 

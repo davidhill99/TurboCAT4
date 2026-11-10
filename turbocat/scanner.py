@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import time
 
 from . import emulator, music, readers, whdload
 from .catalogue import BLANK_SHA1
@@ -9,6 +10,22 @@ from .readers import detect, ContainerResult
 
 MAX_DEPTH = 3                # containers inside containers (e.g. ADF in LHA in HDF)
 MAX_INNER_SIZE = 64 << 20    # don't unpack inner images larger than this
+KEEP_INNER = 256 << 20       # inner files kept in memory until their turn; beyond this, read again
+BIG_ARCHIVE = 200 << 20      # archives this big are listed first so the user can choose to skip them
+ARCHIVE_KINDS = ("zip", "lha", "lzx", "dms", "adz")
+DEFAULT_RATE = 2.5 * (1 << 20)   # bytes a second, for an archive of zipped disks (measured: 790 MB in 5 min)
+RATE_KEY = "archive_read_rate"   # the speed measured on this computer, kept in the catalogue
+LOAD_SHARE = 0.03                # of a big file's progress: loading it from disk
+LIST_SHARE = 0.05                # listing what is in it (opening what is inside is the rest)
+SHOW_INSIDE = 50 << 20           # files this big report their loading, so the window never looks stuck
+
+
+def read_rate(catalogue):
+    """How fast this computer reads big archives, in bytes a second."""
+    try:
+        return float(catalogue.get_meta(RATE_KEY) or DEFAULT_RATE)
+    except (TypeError, ValueError):
+        return DEFAULT_RATE
 FOLDER_WEIGHT = 1 << 20      # Amiga folders: size unknown until read; count as 1 MB for progress
 
 
@@ -25,8 +42,10 @@ def _status(res: ContainerResult) -> str:
 
 
 def analyse_container(kind, data, name, source, depth, catalogue, parent_id, number=None,
-                      path_on_disk=None):
-    """Read one container, store it, then recurse into containers found inside."""
+                      path_on_disk=None, tick=None):
+    """Read one container, store it, then recurse into containers found inside.
+    tick(inner path, fraction or None), if given, is called as files inside are read, so a big
+    archive (an archive of a thousand archives) shows progress and can be stopped part way."""
     try:
         if kind == "hdf":
             res = readers.read_hdf(path_on_disk if path_on_disk else data)
@@ -47,6 +66,9 @@ def analyse_container(kind, data, name, source, depth, catalogue, parent_id, num
 
     files, inner = [], []
     unreadable = 0
+    kept = 0
+    total_size = sum(fe.size or 0 for fe in res.files if not fe.is_dir) or 1
+    read_size = 0
     for fe in res.files:
         sha = None
         content = None
@@ -57,6 +79,14 @@ def analyse_container(kind, data, name, source, depth, catalogue, parent_id, num
             except Exception as ex:
                 unreadable += 1
                 res.problems.append(f"file unreadable: {fe.path} ({ex})")
+            read_size += fe.size or 0
+            if tick:
+                if depth == 0:
+                    # listing is quick; opening what is inside takes the time
+                    tick(fe.path, LOAD_SHARE + LIST_SHARE * read_size / total_size, len(files) + 1,
+                         len(res.files), "inside-read")
+                else:
+                    tick(fe.path, None)
         files.append({"path": fe.path, "size": fe.size,
                       "date": fe.date.isoformat(sep=" ") if fe.date else None,
                       "comment": fe.comment, "protect": fe.protect,
@@ -74,7 +104,11 @@ def analyse_container(kind, data, name, source, depth, catalogue, parent_id, num
         if depth < MAX_DEPTH and 0 < len(content) <= MAX_INNER_SIZE:
             k = detect(fe.path, content[:1024], len(content))
             if k:
-                inner.append((k, content, fe.path))
+                if kept + len(content) <= KEEP_INNER:
+                    kept += len(content)
+                    inner.append((k, content, fe.path, None, len(content)))
+                else:                    # read it again when its turn comes
+                    inner.append((k, None, fe.path, fe.read, len(content)))
 
     # Judge filesystem findings by their effect: if every file reads, they are quirks.
     if res.fs_issues:
@@ -115,31 +149,76 @@ def analyse_container(kind, data, name, source, depth, catalogue, parent_id, num
     if rec["sha1"] in BLANK_SHA1:
         rec["status"] = "empty"
     mid = catalogue.add_media(rec, parent_id, number)
-    for k, content, p in inner:
-        analyse_container(k, content, p, source, depth + 1, catalogue, mid)
+    inner_total = sum(sz for _k, _c, _p, _a, sz in inner) or 1
+    opened = 0
+    for n, (k, content, p, again, size) in enumerate(inner):
+        if tick:
+            if depth == 0:
+                tick(p, LOAD_SHARE + LIST_SHARE + (1 - LOAD_SHARE - LIST_SHARE) * opened / inner_total,
+                     n + 1, len(inner),
+                     "inside-open")
+            else:
+                tick(p, None)
+        if content is None:
+            try:
+                content = again()
+            except Exception:
+                continue
+        inner[n] = None                  # let it go once read
+        opened += size
+        sub = (lambda q, f, *_, p=p: tick(f"{p} › {q}", None)) if tick else None
+        analyse_container(k, content, p, source, depth + 1, catalogue, mid, tick=sub)
     return mid, res
 
 
-def rescan_all(catalogue, progress=print, step=None):
+def rescan_all(catalogue, progress=print, step=None, confirm_big=None):
     """Rescan every folder the catalogue was built from: new and changed files are read,
     unchanged ones skipped, and items whose files have been deleted are removed."""
     roots = catalogue.scan_roots()
-    summary = scan(roots, catalogue, progress=progress, step=step)
+    summary = scan(roots, catalogue, progress=progress, step=step, confirm_big=confirm_big)
     summary["removed"] = catalogue.remove_missing(roots)
     summary["roots"] = roots
     return summary
 
 
-def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=False, step=None):
+def recheck(files, catalogue, progress=print, step=None, confirm_big=None):
+    """Look again at chosen items only, instead of every folder (Disk > Recheck): their own
+    files are read again whatever their dates say, and the folders they are in (not the folders
+    inside those) are checked for new, changed and deleted files, so a disk of a set that was
+    replaced, added or removed is picked up. Folders scanned before stay as they were."""
+    files = [os.path.abspath(f) for f in files]
+    folders = sorted({os.path.dirname(f) for f in files})
+    summary = scan(folders, catalogue, progress=progress, step=step, confirm_big=confirm_big,
+                   shallow=True, add_roots=False, force=set(files))
+    summary["removed"] = catalogue.remove_missing(folders)
+    summary["roots"] = folders
+    return summary
+
+
+def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=False, step=None,
+         confirm_big=None, shallow=False, add_roots=True, force=()):
     """Scan files and folders. Returns a summary dict.
 
     progress(text) gets a line per item read. step(phase, done, total, done_bytes,
     total_bytes, path), if given, is called often enough to drive a progress bar: phase
-    "checking" while working out what is new or changed, then "reading".
+    "checking" while working out what is new or changed, then "reading" once per file. While
+    one file is read, "inside-load" (a big file loading from disk: done and total in MB),
+    "inside-read" (its list of files: done and total count them) and then
+    "inside-open" (the disks and archives inside it) report how far into it the scan is, with
+    done_bytes and total_bytes counting through that file only, and path "file › inner path".
+
+    confirm_big(big, rate), if given, is asked about archives of BIG_ARCHIVE or more before
+    any are read: big is [(path, kind, size)], rate the reading speed in bytes a second; it
+    returns the paths to read. The others are left for another time (summary "held_back").
+
+    shallow: only the files directly in each folder (and Amiga folders there), not the folders
+    inside it. add_roots: remember these folders for Rescan. force: files read again even if
+    their size and date haven't changed.
     """
     summary = {"scanned": 0, "skipped": 0, "ignored": 0}
     found = [os.path.abspath(os.path.expanduser(p)) for p in paths]
-    catalogue.add_scan_roots([p for p in found if os.path.exists(p)])
+    if add_roots:
+        catalogue.add_scan_roots([p for p in found if os.path.exists(p)])
     todo = []
     for p in paths:
         p = os.path.abspath(os.path.expanduser(p))
@@ -161,7 +240,7 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
                         todo.append(("folder", full))
                     else:
                         keep.append(d)
-                dirs[:] = keep
+                dirs[:] = [] if shallow else keep
                 for f in sorted(fnames):
                     todo.append((None, os.path.join(root, f)))
         else:
@@ -182,7 +261,7 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
             work.append(("folder", path, FOLDER_WEIGHT))
             continue
         size, mtime = st.st_size, st.st_mtime
-        if not rescan and catalogue.known_unchanged(path, size, mtime):
+        if not rescan and path not in force and catalogue.known_unchanged(path, size, mtime):
             summary["skipped"] += 1
             continue
         try:
@@ -201,6 +280,16 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
             continue
         work.append((kind, path, size))
 
+    # Big archives take minutes each (an archive of a thousand zipped disks): ask first.
+    big = [(path, kind, size) for kind, path, size in work
+           if kind in ARCHIVE_KINDS and size >= BIG_ARCHIVE]
+    if big and confirm_big:
+        wanted = set(confirm_big(big, read_rate(catalogue)))
+        held = [path for path, _k, _s in big if path not in wanted]
+        if held:
+            summary["held_back"] = held
+            work = [w for w in work if w[1] not in set(held)]
+
     # Pass 2 - read them, reporting progress by bytes so big images count for more.
     total_bytes = sum(w[2] for w in work)
     done_bytes = 0
@@ -213,10 +302,47 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
         data = None
         if kind not in ("hdf", "folder"):
             with open(path, "rb") as fh:
-                data = fh.read()
-        mid, res = analyse_container(kind, data, os.path.basename(path), path, 0, catalogue,
-                                     None, number, path_on_disk=path)
+                if step and size >= SHOW_INSIDE:
+                    # a big file takes a while to load from disk: count it in
+                    parts, got = [], 0
+                    step("inside-load", 0, size >> 20, 0, size, path)
+                    for chunk in iter(lambda: fh.read(16 << 20), b""):
+                        parts.append(chunk)
+                        got += len(chunk)
+                        step("inside-load", got >> 20, size >> 20, int(size * LOAD_SHARE * got / size),
+                             size, path)
+                    data = b"".join(parts)
+                    del parts
+                else:
+                    data = fh.read()
+        tick = None
+        started = time.monotonic()
+        if step:
+            # when it last reported, how far into the file, which count, of how many, which stage
+            last = [started, 0.0, 0, 0, "inside-read"]
+
+            def tick(inner, frac, n=None, of=None, stage=None, path=path, size=size, last=last):
+                if frac is not None:
+                    last[1] = frac
+                if n is not None:
+                    last[2:5] = [n, of, stage]
+                now = time.monotonic()
+                if now - last[0] >= 0.25:
+                    last[0] = now
+                    step(last[4], last[2], last[3], int(size * last[1]), size, f"{path} › {inner}")
+        try:
+            mid, res = analyse_container(kind, data, os.path.basename(path), path, 0, catalogue,
+                                         None, number, path_on_disk=path, tick=tick)
+        except BaseException:
+            # stopped part way through: leave this file as it was, so the next scan reads it again
+            catalogue.db.rollback()
+            raise
+        data = None
         catalogue.commit()
+        took = time.monotonic() - started
+        if kind in ARCHIVE_KINDS and size >= 32 << 20 and took > 1:
+            # remember how fast this computer reads big archives, for the next estimate
+            catalogue.set_meta(RATE_KEY, round(0.5 * read_rate(catalogue) + 0.5 * size / took))
         summary["scanned"] += 1
         done_bytes += size
         if progress:

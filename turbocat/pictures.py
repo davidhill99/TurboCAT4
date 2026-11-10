@@ -174,84 +174,120 @@ def _icon_rank(path, dirs):
     return 1 if stem.lower() in dirs else 2
 
 
-def find_on_item(cat, top):
+def find_on_item(cat, top, inside=None, stop=lambda: False):
     """Look through an item (and the disks or archives inside it) for its icon and best picture.
-    Returns dict(icon=Image|bytes, icon_from=str, pic=Image, pic_from=str)."""
+    Returns dict(icon=Image|bytes, icon_from=str, pic=Image, pic_from=str).
+
+    Each container is opened once, from the one above it, depth first: an archive of a thousand
+    zipped disks is read from disk once, not once per disk. Where two finds are equally good, the
+    one nearer the item itself wins. inside(done, total, name), if given, is told how far through
+    the containers inside the item it is; stop() is checked between the containers inside it (raising Stopped)."""
     found = {"icon": None, "icon_from": "", "pic": None, "pic_from": "", "score": None,
-             "icon_rank": 9, "music": []}
-    # Breadth first: the item itself, then what's inside it.
-    queue = [[top]]
-    while queue:
-        chain = queue.pop(0)
-        m = chain[-1]
-        queue += [chain + [k] for k in cat.db.execute(
-            "SELECT * FROM media WHERE parent_id=? ORDER BY id", (m["id"],)).fetchall()]
-        if m["kind"] not in READABLE or m["status"] == "empty":
-            continue
+             "icon_rank": 9, "icon_depth": 0, "pic_depth": 0, "music": []}
+    total = cat.db.execute(
+        "WITH RECURSIVE d(id) AS (SELECT id FROM media WHERE parent_id=? "
+        "UNION ALL SELECT m.id FROM media m JOIN d ON m.parent_id=d.id) SELECT COUNT(*) FROM d",
+        (top["id"],)).fetchone()[0]
+    seen = [0]
+
+    def look(m, chain, data):
+        depth = len(chain) - 1
+        if depth:
+            seen[0] += 1
+            if stop():
+                raise Stopped()
+            if inside:
+                inside(seen[0], total, os.path.basename(m["inner_path"] or m["source"]))
+        kids = cat.db.execute("SELECT * FROM media WHERE parent_id=? ORDER BY id", (m["id"],)).fetchall()
+        if m["kind"] not in READABLE and not kids:
+            return
         try:
-            data = _container_data(cat, chain)
+            if data is None and m["kind"] != "folder":
+                data = _container_data(cat, chain)
             files = _files_in(m["kind"], data, m["source"])
         except Exception:
-            continue
-        where = " > ".join(os.path.basename(c["inner_path"] or c["source"]) for c in chain[1:])
-        prefix = (where + ": ") if where else ""
-        dirs = {fe.path.lower() for fe in files if fe.is_dir}
-        reads = 0
-        for fe in files:
-            if fe.is_dir or not fe.read or not fe.size:
-                continue
-            low = fe.path.lower()
-            if low.endswith(".info"):
-                rank = _icon_rank(fe.path, dirs)
-                if rank is None or rank >= found["icon_rank"]:
-                    continue
-                try:
-                    img = amigaimg.decode_icon(fe.read())
-                except Exception:
-                    img = None
-                if img is not None:
-                    found.update(icon=img, icon_from=prefix + fe.path, icon_rank=rank)
-                continue
-            named_mod = music.NAME_HINT.search(fe.path) is not None
-            maybe_pic = 1500 <= fe.size <= MAX_PIC_SIZE and not low.endswith(NOT_PICTURES)
-            maybe_mod = 600 <= fe.size <= 32_000_000 and (
-                named_mod or (fe.size >= 1084 and not low.endswith(NOT_MODULES)))
-            if not (maybe_pic or maybe_mod):
-                continue
-            if reads >= MAX_READS and not named_mod:
-                continue
-            reads += 1
-            try:
-                content = fe.read()
-            except Exception:
-                continue
-            if not amigaimg.is_iff_picture(content[:12]):
-                tune = music.identify(fe.path, content) if maybe_mod else None
-                if tune:
-                    found["music"].append({"media_id": m["id"], "file": fe.path,
-                                           "shown": prefix + fe.path, "fmt": tune[0],
-                                           "title": tune[1], "size": len(content)})
-                elif content[:4] == b"\0\0\x03\xf3" and b"M.K." in content:
-                    for off, length, title in music.embedded(content):
-                        found["music"].append({"media_id": m["id"], "file": fe.path,
-                                               "shown": prefix + fe.path, "fmt": "ProTracker",
-                                               "title": title, "size": length,
-                                               "offset": off, "length": length})
-                continue
-            if not maybe_pic:
+            return
+        if m["kind"] in READABLE and m["status"] != "empty":
+            _look_in_files(found, m, chain, files, depth)
+        by_path = {fe.path: fe for fe in files if fe.read}
+        for k in kids:
+            fe = by_path.get(k["inner_path"])
+            if fe is None:
                 continue
             try:
-                d = amigaimg.decode_iff(content)
+                kid_data = fe.read()
             except Exception:
-                d = None
-            if not d:
                 continue
-            img = amigaimg.square_pixels(*d)
-            s = _score(fe.path, d[0])
-            # Below 0 it's more likely a score table or a strip of graphics than a screen.
-            if s is not None and s >= 0 and (found["score"] is None or s > found["score"]):
-                found.update(pic=img, pic_from=prefix + fe.path, score=s)
+            look(k, chain + [k], kid_data)
+
+    look(top, [top], None)
     return found
+
+
+def _look_in_files(found, m, chain, files, depth):
+    """Icons, pictures and tunes among one container's files."""
+    where = " > ".join(os.path.basename(c["inner_path"] or c["source"]) for c in chain[1:])
+    prefix = (where + ": ") if where else ""
+    dirs = {fe.path.lower() for fe in files if fe.is_dir}
+    reads = 0
+    for fe in files:
+        if fe.is_dir or not fe.read or not fe.size:
+            continue
+        low = fe.path.lower()
+        if low.endswith(".info"):
+            rank = _icon_rank(fe.path, dirs)
+            # equally good: the one nearer the item itself
+            if rank is None or (found["icon"] is not None and
+                                (rank, depth) >= (found["icon_rank"], found["icon_depth"])):
+                continue
+            try:
+                img = amigaimg.decode_icon(fe.read())
+            except Exception:
+                img = None
+            if img is not None:
+                found.update(icon=img, icon_from=prefix + fe.path, icon_rank=rank, icon_depth=depth)
+            continue
+        named_mod = music.NAME_HINT.search(fe.path) is not None
+        maybe_pic = 1500 <= fe.size <= MAX_PIC_SIZE and not low.endswith(NOT_PICTURES)
+        maybe_mod = 600 <= fe.size <= 32_000_000 and (
+            named_mod or (fe.size >= 1084 and not low.endswith(NOT_MODULES)))
+        if not (maybe_pic or maybe_mod):
+            continue
+        if reads >= MAX_READS and not named_mod:
+            continue
+        reads += 1
+        try:
+            content = fe.read()
+        except Exception:
+            continue
+        if not amigaimg.is_iff_picture(content[:12]):
+            tune = music.identify(fe.path, content) if maybe_mod else None
+            if tune:
+                found["music"].append({"media_id": m["id"], "file": fe.path,
+                                       "shown": prefix + fe.path, "fmt": tune[0],
+                                       "title": tune[1], "size": len(content)})
+            elif content[:4] == b"\0\0\x03\xf3" and b"M.K." in content:
+                for off, length, title in music.embedded(content):
+                    found["music"].append({"media_id": m["id"], "file": fe.path,
+                                           "shown": prefix + fe.path, "fmt": "ProTracker",
+                                           "title": title, "size": length,
+                                           "offset": off, "length": length})
+            continue
+        if not maybe_pic:
+            continue
+        try:
+            d = amigaimg.decode_iff(content)
+        except Exception:
+            d = None
+        if not d:
+            continue
+        s = _score(fe.path, d[0])
+        # Below 0 it's more likely a score table or a strip of graphics than a screen.
+        # Equally good: the one nearer the item itself (as when this looked breadth first).
+        if s is not None and s >= 0 and (found["score"] is None or s > found["score"] or
+                                         (s == found["score"] and depth < found["pic_depth"])):
+            found.update(pic=amigaimg.square_pixels(*d), pic_from=prefix + fe.path, score=s,
+                         pic_depth=depth)
 
 
 def _store(cat, key, icon=None, icon_from="", pic=None, pic_from="", origin="", online=0):
@@ -382,7 +418,9 @@ def extract_file(cat, media_id, path):
 
 
 def build(cat, progress=None, stop=lambda: False):
-    """Find icons and pictures on every item that hasn't been looked at yet."""
+    """Find icons and pictures on every item that hasn't been looked at yet.
+    progress(i, n, item) before each item; progress(i, n, item, (done, total, name)) as it
+    goes through the disks and archives inside a big one."""
     ensure_schema(cat)
     if cat.get_meta("picture_rules", 1) != RULES:
         # Look through every disk again; pictures found online are kept unless a better
@@ -396,14 +434,26 @@ def build(cat, progress=None, stop=lambda: False):
     done = {r["key"] for r in cat.db.execute("SELECT key FROM thumbs WHERE icon_from IS NOT NULL")}
     todo = [m for m in cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number")
             if item_key(m) not in done and m["kind"] != "hdf"]
-    found = 0
+    found = looked = 0
+    stopped = False
     for i, m in enumerate(todo):
         if stop():
+            stopped = True
             break
         if progress:
             progress(i, len(todo), m)
+        last = [time.monotonic()]
+
+        def inside(done, total, name, i=i, m=m, last=last):
+            now = time.monotonic()
+            if progress and now - last[0] >= 0.25:
+                last[0] = now
+                progress(i, len(todo), m, (done, total, name))
         try:
-            f = find_on_item(cat, m)
+            f = find_on_item(cat, m, inside, stop)
+        except Stopped:
+            stopped = True
+            break                         # not stored: looked through again next time
         except Exception:
             f = {"icon": None, "pic": None, "icon_from": "", "pic_from": ""}
         _store(cat, item_key(m), f["icon"], f["icon_from"], f["pic"], f["pic_from"], "disk")
@@ -414,12 +464,13 @@ def build(cat, progress=None, stop=lambda: False):
             [(item_key(m), t["media_id"], t["file"], t["shown"], t["fmt"], t["title"], t["size"],
               t.get("offset", 0), t.get("length")) for t in f.get("music", [])])
         found += bool(f["icon"] or f["pic"])
+        looked += 1
         if i % 20 == 19:
             cat.db.commit()
     cat.db.commit()
     if progress:
         progress(len(todo), len(todo), None)
-    return {"looked": len(todo), "found": found}
+    return {"looked": looked, "found": found, "stopped": stopped}
 
 
 # ---------------------------------------------------------------- online
