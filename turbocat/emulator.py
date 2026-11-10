@@ -23,6 +23,7 @@ AMIBERRY_FLATPAK = "com.blitterstudio.amiberry"
 ROM_DIRS = ["~/Amiberry/ROMs", "~/Amiberry/Kickstarts", "~/Amiberry/roms",
             "~/Documents/FS-UAE/Kickstarts", "~/.var/app/com.blitterstudio.amiberry/data/amiberry/roms",
             "~/FS-UAE/Kickstarts"]
+EXTRA_ROM_DIRS = []      # folders where scanning found Kickstart ROMs (filled in by the window)
 MODELS = ("A500", "A600", "A1200")
 # Kickstarts each model can use, best first: (major version, minor version or None)
 WANTED = {"A500": [(34, None), (40, 63), (37, 175)],
@@ -50,41 +51,159 @@ def find_emulators():
     return found
 
 
+ROM_SIZES = (262144, 524288)
+AF_HEADER = b"AMIROMTYPE1"            # Amiga Forever's encrypted ROMs: this, then the ROM XORed with rom.key
+
+
+def looks_like_rom(head, size):
+    """Whether a file is probably a Kickstart ROM, from its size and first bytes."""
+    if size in ROM_SIZES:
+        return head[:2] in (b"\x11\x11", b"\x11\x14")
+    return size in tuple(n + len(AF_HEADER) for n in ROM_SIZES) and head[:11] == AF_HEADER
+
+
+def rom_data(data, key=None):
+    """(ROM bytes, encrypted) for a Kickstart file; the ROM is None if it is encrypted and there
+    is no key, or if it isn't a Kickstart ROM."""
+    encrypted = data[:11] == AF_HEADER
+    if encrypted:
+        body = data[11:]
+        if not key:
+            return None, True
+        # XOR with the repeated key, all at once (a byte at a time took about a second per ROM).
+        pad = (key * (len(body) // len(key) + 1))[:len(body)]
+        data = (int.from_bytes(body, "big") ^ int.from_bytes(pad, "big")).to_bytes(len(body), "big")
+    if len(data) not in ROM_SIZES or data[:2] not in (b"\x11\x11", b"\x11\x14"):
+        return None, encrypted                  # Kickstart ROMs start with 1111 / 1114
+    return data, encrypted
+
+
+def rom_version(rom):
+    """(major, minor, crc) of decrypted ROM bytes."""
+    return (int.from_bytes(rom[12:14], "big"), int.from_bytes(rom[14:16], "big"),
+            f"{zlib.crc32(rom) & 0xFFFFFFFF:08x}")
+
+
+def read_key(folder):
+    try:
+        with open(os.path.join(folder, "rom.key"), "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def _rom_info(path):
     """(major, minor, crc) of a Kickstart ROM, decrypting Amiga Forever ROMs with rom.key."""
     try:
         size = os.path.getsize(path)
-        if size not in (262144, 524288, 262155, 524299):
+        if size not in ROM_SIZES and size not in tuple(n + len(AF_HEADER) for n in ROM_SIZES):
             return None
         with open(path, "rb") as f:
             data = f.read()
     except OSError:
         return None
-    if data[:11] == b"AMIROMTYPE1":
-        key_path = os.path.join(os.path.dirname(path), "rom.key")
-        try:
-            with open(key_path, "rb") as f:
-                key = f.read()
-        except OSError:
-            return None
-        body = data[11:]
-        if not key:
-            return None
-        # XOR with the repeated key, all at once (a byte at a time took about a second per ROM).
-        pad = (key * (len(body) // len(key) + 1))[:len(body)]
-        data = (int.from_bytes(body, "big") ^ int.from_bytes(pad, "big")).to_bytes(len(body), "big")
-    if data[:2] not in (b"\x11\x11", b"\x11\x14"):         # Kickstart ROMs start with 1111 / 1114
-        return None
-    major = int.from_bytes(data[12:14], "big")
-    minor = int.from_bytes(data[14:16], "big")
-    return major, minor, f"{zlib.crc32(data) & 0xFFFFFFFF:08x}"
+    rom, _ = rom_data(data, read_key(os.path.dirname(path)) if data[:11] == AF_HEADER else None)
+    return rom_version(rom) if rom else None
+
+
+# Kickstart release names by exec's major version (and minor, where a major covers several).
+RELEASES = {30: "1.0", 31: "1.1", 32: "1.1", 33: "1.2", 34: "1.3", 35: "1.3", 36: "2.0",
+            37: "2.04", 38: "2.1", 39: "3.0", 40: "3.1", 45: "3.1.4", 46: "3.2", 47: "3.2"}
+MINOR_RELEASES = {(37, 299): "2.05", (37, 300): "2.05", (37, 350): "2.05",
+                  (47, 96): "3.2.1", (47, 111): "3.2.2"}
+# Well-known ROMs by CRC32: (name, machine it was made for). Machine-specific ROMs (A3000,
+# A4000, CD32) are not offered for the A500/A600/A1200 that Play in emulator sets up.
+KNOWN_ROMS = {
+    "428a9a4b": ("Kickstart 0.7 (beta)", ""), "299790ff": ("Kickstart 1.0", "A1000"),
+    "d060572a": ("Kickstart 1.1 (NTSC)", "A1000"), "ec86dae2": ("Kickstart 1.1 (PAL)", "A1000"),
+    "a6ce1636": ("Kickstart 1.2", "A500/A2000"), "c4f0f55f": ("Kickstart 1.3", "A500/A2000"),
+    "e0f37258": ("Kickstart 1.3", "A500/A2000"), "bc0ec13f": ("Kickstart 2.0 beta", "A3000"),
+    "c3bdb240": ("Kickstart 2.04", "A500+"), "43b0df7b": ("Kickstart 2.05", "A600HD"),
+    "9e6ac152": ("Kickstart 3.0", "A1200"), "1483a091": ("Kickstart 3.1", "A1200"),
+    "fc24ae0d": ("Kickstart 3.1", "A500/A600/A2000"), "efb239cc": ("Kickstart 3.1", "A3000"),
+    "1e62d4a5": ("Kickstart 3.1", "CD32"), "261339f8": ("Kickstart 3.1 (Walker beta)", "Walker"),
+    "42baa124": ("CDTV extended ROM", "CDTV"), "87746be2": ("CD32 extended ROM", "CD32"),
+}
+for _crc in A4000_CRC:
+    KNOWN_ROMS.setdefault(_crc, ("Kickstart 3.1" if _crc != "3ac99edc" else "Kickstart 3.1.4", "A4000"))
+NOT_FOR_PLAY = ("A3000", "A4000", "CD32", "CDTV", "Walker")
+_EXEC_ID = re.compile(rb"exec(?:\.library)?(?: amiga-m68k)? (\d+)\.(\d+)")
+
+
+def _exec_id(rom):
+    """exec.library's ID string, found through its ROM tag, or b""."""
+    base = 0x1000000 - len(rom)
+    for m in re.finditer(rb"\x4a\xfc", rom):
+        o = m.start()
+        if int.from_bytes(rom[o + 2:o + 6], "big") != base + o:      # a ROM tag points at itself
+            continue
+        def text(addr):
+            a = addr - base
+            return rom[a:rom.find(b"\0", a)] if 0 <= a < len(rom) else b""
+        if text(int.from_bytes(rom[o + 14:o + 18], "big")) == b"exec.library":
+            return text(int.from_bytes(rom[o + 18:o + 22], "big")).strip()
+    return b""
+
+
+def describe_rom(rom):
+    """What a (decrypted) ROM is: {name, version, crc, machine, kickstart, aros}."""
+    major, minor, crc = rom_version(rom)
+    exec_id = _exec_id(rom)
+    aros = b"AROS" in rom
+    out = {"crc": crc, "version": "", "machine": "", "kickstart": bool(exec_id) and not aros,
+           "aros": aros, "major": major, "minor": minor}
+    if aros:
+        out["name"] = "AROS ROM (free replacement)" if exec_id else "AROS extended ROM"
+        return out
+    if crc in KNOWN_ROMS:
+        out["name"], out["machine"] = KNOWN_ROMS[crc]
+    if not exec_id:
+        out.setdefault("name", "Extended ROM" if major != 0xFFFF and major < 60 else "Other Amiga ROM")
+        return out
+    m = _EXEC_ID.search(exec_id)
+    if major == 0xFFFF and m and crc not in KNOWN_ROMS:   # the oldest keep it only in exec's tag
+        major, minor = int(m.group(1)), int(m.group(2))
+    if major != 0xFFFF:
+        out["version"] = f"{major}.{minor}"
+        out["major"], out["minor"] = major, minor
+    if "name" not in out:
+        rel = MINOR_RELEASES.get((major, minor)) or RELEASES.get(major)
+        out["name"] = f"Kickstart {rel}" if rel else f"Kickstart (version {major}.{minor})"
+    return out
+
+
+def kickstart_name(major, minor, crc=""):
+    """'Kickstart 1.3', 'Kickstart 3.1 (A4000)'..., or 'Kickstart (version 50.1)' if unknown."""
+    if crc in KNOWN_ROMS:
+        name, machine = KNOWN_ROMS[crc]
+        return f"{name} ({machine})" if machine in NOT_FOR_PLAY and machine not in name else name
+    rel = MINOR_RELEASES.get((major, minor)) or RELEASES.get(major)
+    return f"Kickstart {rel}" if rel else f"Kickstart (version {major}.{minor})"
+
+
+def models_for(major, minor, crc=""):
+    """The models Play in emulator would start with this ROM (when it's the best one found)."""
+    if KNOWN_ROMS.get(crc, ("", ""))[1] in NOT_FOR_PLAY:
+        return []
+    return [model for model, wants in WANTED.items()
+            if any(major == ma and (mi is None or minor == mi) for ma, mi in wants)
+            and not (model == "A1200" and crc in A4000_CRC)]
+
+
+def catalogued_rom_dirs(cat):
+    """Folders holding the Kickstart ROMs found by scanning, for Play and TurboView to use."""
+    try:
+        rows = cat.db.execute("SELECT source FROM media WHERE kind='kickstart' AND parent_id IS NULL")
+        return sorted({os.path.dirname(r["source"]) for r in rows})
+    except Exception:
+        return []
 
 
 def find_kickstarts(extra_dirs=()):
     """{model: path} for the Kickstart ROMs found."""
     roms = []
-    for d in list(extra_dirs) + ROM_DIRS:
-        for p in sorted(glob.glob(os.path.join(os.path.expanduser(d), "*"))):
+    for d in dict.fromkeys(list(extra_dirs) + EXTRA_ROM_DIRS + ROM_DIRS):
+        for p in sorted(glob.glob(os.path.join(glob.escape(os.path.expanduser(d)), "*"))):
             info = _rom_info(p)
             if info:
                 roms.append((p, *info))
@@ -92,8 +211,8 @@ def find_kickstarts(extra_dirs=()):
     for model, wants in WANTED.items():
         for major, minor in wants:
             match = [p for p, ma, mi, crc in roms
-                     if ma == major and (minor is None or mi == minor)
-                     and not (model == "A1200" and crc in A4000_CRC)]
+                     if model in models_for(ma, mi, crc) and ma == major
+                     and (minor is None or mi == minor)]
             if match:
                 found[model] = match[0]
                 break

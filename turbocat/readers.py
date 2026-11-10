@@ -327,13 +327,67 @@ def read_hdf(path_or_data) -> ContainerResult:
 
 # ---------------------------------------------------------------- archives
 
+# (program, arguments, folder to run it in): lha (lhasa or jlha) also reads -lh1-, and is run inside
+# the output folder because jlha ignores w=<dir>.
+LHA_TOOLS = (("7z", ["x", "-y", "-bd", "-bso0", "-bsp0", "-oout", "--", "arc.lha"], "."),
+             ("lha", ["xqf", "../arc.lha"], "out"))
+
+
+def _lha_with_tool(data):
+    """Open an LHA archive with 7-Zip or lha, for the old ones lhafile can't read (the -lh1- method
+    of 1990-91, header variants). Returns a list of FileEntry, or None if no tool could."""
+    for tool, args, run_in in LHA_TOOLS:
+        exe = shutil.which(tool)
+        if not exe:
+            continue
+        with tempfile.TemporaryDirectory(prefix="turbocat-lha-") as tmp:
+            with open(os.path.join(tmp, "arc.lha"), "wb") as f:
+                f.write(data)
+            out = os.path.join(tmp, "out")
+            os.makedirs(out)
+            try:
+                r = subprocess.run([exe] + args, cwd=os.path.join(tmp, run_in), capture_output=True,
+                                   timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            entries = []
+            for folder, dirs, files in os.walk(out):
+                for name in sorted(dirs) + sorted(files):
+                    full = os.path.join(folder, name)
+                    rel = os.path.relpath(full, out).replace(os.sep, "/")
+                    if os.path.islink(full):
+                        continue
+                    st = os.stat(full)
+                    date = datetime.datetime.fromtimestamp(st.st_mtime)
+                    if os.path.isdir(full):
+                        entries.append(FileEntry(rel, 0, date, "", "", True, None))
+                    else:
+                        with open(full, "rb") as f:
+                            content = f.read()
+                        entries.append(FileEntry(rel, len(content), date, "", "", False,
+                                                 (lambda c=content: c)))
+            # 7-Zip says when it fails; jlha doesn't, so judge by what it wrote
+            if (r.returncode == 0 or tool != "7z") and any(not e.is_dir for e in entries):
+                return entries
+    return None
+
+
 def read_lha(data: bytes) -> ContainerResult:
     import lhafile
     res = ContainerResult("lha")
     try:
         arc = lhafile.LhaFile(io.BytesIO(data))
+        for info in arc.infolist():
+            if info.compress_type not in (b"-lh0-", b"-lh4-", b"-lh5-", b"-lh6-", b"-lh7-", b"-lhd-"):
+                raise ValueError(f"unsupported compression {info.compress_type!r}")
     except Exception as ex:
-        res.problems.append(f"LHA archive unreadable: {ex}")
+        files = _lha_with_tool(data)
+        if files is None:
+            res.problems.append(f"LHA archive unreadable: {ex}" + (
+                "" if any(shutil.which(t) for t, _, _ in LHA_TOOLS)
+                else " (installing 7-Zip or lha lets TurboCAT open older LHA archives)"))
+        else:
+            res.files = files
         return res
     for info in arc.infolist():
         name = info.filename.replace("\\", "/")
@@ -442,6 +496,39 @@ def read_module(data: bytes, name: str = "module") -> ContainerResult:
             res.volume = found[1]
     res.files.append(FileEntry(os.path.basename(name), len(data), None, "", "", False,
                                (lambda d=data: d)))
+    return res
+
+
+def read_kickstart(data: bytes, path: str = "") -> ContainerResult:
+    """A Kickstart ROM: its release and version, and which Amiga models it suits."""
+    from . import emulator
+    res = ContainerResult("kickstart")
+    key = emulator.read_key(os.path.dirname(path)) if path and data[:11] == emulator.AF_HEADER else None
+    rom, encrypted = emulator.rom_data(data, key)
+    af = " (Amiga Forever, encrypted)" if encrypted else ""
+    if rom is None:
+        res.info["format"] = "Amiga ROM" + af
+        if encrypted and not key:
+            res.volume = "Kickstart ROM"
+            res.warnings.append("encrypted Amiga Forever ROM: rom.key isn't beside it, so its "
+                                "version can't be read and emulators can't use it")
+        else:
+            res.volume = "Other Amiga ROM"         # e.g. a CD32 FMV cartridge ROM
+        return res
+    rd = emulator.describe_rom(rom)
+    res.volume = rd["name"]
+    if rd["machine"] in emulator.NOT_FOR_PLAY and rd["machine"] not in rd["name"]:
+        res.volume += f" ({rd['machine']})"
+    res.info["format"] = ("Kickstart ROM" if rd["kickstart"] else
+                          "AROS ROM" if rd["aros"] else "Amiga ROM") + af
+    if rd["version"]:
+        res.info["kickstart"] = rd["version"]
+    if rd["machine"]:
+        res.info["machine"] = rd["machine"]
+    res.info["rom_crc"] = rd["crc"]
+    res.info["rom_size"] = f"{len(rom) // 1024} KB"
+    res.info["models"] = (emulator.models_for(rd["major"], rd["minor"], rd["crc"])
+                          if rd["kickstart"] else [])
     return res
 
 

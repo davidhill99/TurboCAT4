@@ -15,23 +15,23 @@ import time
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import (QAbstractTableModel, QIODevice, QItemSelectionModel, QModelIndex,
-                            QObject, QRectF, QSize, QSortFilterProxyModel, Qt, QThread, QTimer,
+                            QEvent, QObject, QPoint, QRect, QRectF, QSize, QSortFilterProxyModel, Qt, QThread, QTimer,
                             QUrl, Signal)
 from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QAction, QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog,
-                               QFrame, QGridLayout, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+                               QFrame, QGridLayout, QLayout, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QRadioButton,
                                QButtonGroup, QHBoxLayout, QProgressBar,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QPushButton,
                                QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
-                               QTableView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QTableView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
 from . import APP_NAME, VERSION
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
-from . import datlists, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
+from . import coverdisks, datlists, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
 from .scanner import rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
@@ -68,7 +68,7 @@ ARCHIVE_KINDS = ("lha", "lzx", "zip")
 DISK_KINDS = ("adf", "dms", "adz", "hdf")
 KIND_ICON = {"adf": "disk", "dms": "disk", "adz": "disk", "hdf": "harddrive",
              "lha": "archive", "lzx": "archive", "zip": "archive", "folder": "folder",
-             "module": "music"}
+             "module": "music", "kickstart": "chip"}
 SET_TONE = {"ok": ("ok", "ok-tint", "ok"), "warn": ("warn", "warn-tint", "warning"),
             "problem": ("problem", "problem-tint", "problem")}
 STATUS = {"ok": ("OK", "ok", "ok-tint", None),
@@ -83,6 +83,8 @@ FILTERS = [
     ("games", "Games", "game", lambda it: bool(it.game)),
     ("music", "Music", "music", lambda it: it.music > 0),
     ("utils", "Utilities", "tool", lambda it: bool(it.utility)),
+    ("covers", "Coverdisks", "magazine", lambda it: it.cover is not None),
+    ("roms", "Kickstart ROMs", "chip", lambda it: it.type == "Kickstart"),
     ("problems", "Problems", "problem", lambda it: it.status == "error"),
     ("warnings", "Warnings", "warning", lambda it: it.status == "warning"),
     ("dups", "Duplicates", "duplicate", lambda it: it.copies > 1),
@@ -211,12 +213,14 @@ class Item:
     name_guess: str = ""        # a guess from the folder, for a file called "Disk1.adf"
     key: str = ""               # pictures / music key
     music: int = 0              # music modules found inside
+    cover: object = None        # a coverdisks.Coverdisk: the magazine, issue and disk it came with
     search_blob: str = field(default="", repr=False)
 
 
 def load_items(cat):
     rows = cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number").fetchall()
     shared_sha = {r["sha1"] for r in cat.duplicate_images()}
+    emulator.EXTRA_ROM_DIRS[:] = emulator.catalogued_rom_dirs(cat)   # ROMs found by scanning
     thumbs = pictures.thumbs_by_key(cat)
     game_why = games.classify(cat)
     lists = datlists.lists_in({os.path.dirname(m["source"]) for m in rows})
@@ -226,12 +230,19 @@ def load_items(cat):
     for r in cat.db.execute("SELECT * FROM media WHERE parent_id IS NOT NULL ORDER BY id"):
         inside.setdefault(top.get(r["id"]), []).append(r)
     known = identify.identify({m["id"]: [m] + inside.get(m["id"], []) for m in rows}, lists)
-    for mid, (name, _) in known.items():           # an identified disk by a games publisher
-        if mid not in game_why:
+    not_games = ("Applications", "Compilations - Applications", "Coverdisks", "Demos", "Diskmags",
+                 "Docs", "Drivers", "Educational", "Firmware", "Kickstart", "Operating Systems",
+                 "Packmags", "Book")
+    for mid, (name, _src, which) in known.items():   # an identified disk by a games publisher
+        if mid not in game_why and not str(which).startswith(not_games):
             pub = games._publisher(name)
             if pub:
                 game_why[mid] = f"identified as a {pub} disk by its checksum ({pub} published games)"
     util_why = utilities.classify(cat, rows, game_why, lists, cat.scan_roots())
+    for mid, (_name, _src, which) in known.items():  # TOSEC files it with the applications
+        if mid not in util_why and mid not in game_why and str(which).startswith(
+                ("Applications", "Compilations - Applications")):
+            util_why[mid] = f"in TOSEC's {which} list"
     starred = favs.load(cat)
     rank = {"error": 3, "warning": 2}
     items = []
@@ -254,7 +265,7 @@ def load_items(cat):
         elif disk is not m:
             typ, ico = f"{dkind.upper()} in {kind.upper()}", KIND_ICON.get(dkind, "disk")
         else:
-            typ, ico = ({"folder": "Folder", "module": "Module"}.get(kind, kind.upper()),
+            typ, ico = ({"folder": "Folder", "module": "Module", "kickstart": "Kickstart"}.get(kind, kind.upper()),
                         KIND_ICON.get(kind, "disk"))
 
         status = disk["status"] or "ok"
@@ -277,13 +288,16 @@ def load_items(cat):
         if m["id"] in known and (from_text or not (disk["volume"] or m["whd_name"])):
             # Text found on the disk (or nothing) is a poor title next to the disk's real name.
             title, from_text = pictures.clean_title(known[m["id"]][0]), False
+        cover = coverdisks.recognise(m["source"], known.get(m["id"])) if kind != "kickstart" else None
+        if cover is not None and cover.magazine:
+            title, from_text = cover.title(), False       # "Amiga Shopper #47 · Mar 1995 · Disk 2 of 3"
 
         if disk is m:
             n = (m["file_count"] or 0) + sum(k["file_count"] or 0 for k in kids)
         else:
             n = (disk["file_count"] or 0) + sum(k["file_count"] or 0 for k in kids if k is not disk)
         files = f"{n:,}" if n or (disk["volume"] and not non_dos) else "—"
-        if status == "empty":
+        if status == "empty" or kind == "kickstart":
             files = "—"
         # Things inside it that also turn up elsewhere (not counting the item's own disk,
         # which is what makes a true duplicate).
@@ -307,7 +321,7 @@ def load_items(cat):
             tosec_name=identify.stem(known[m["id"]][0]) if m["id"] in known else "",
             identified_by=known[m["id"]][1] if m["id"] in known else "",
             name_guess="" if m["id"] in known else identify.guess(m["source"]),
-            key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0)))
+            key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0), cover=cover))
     dupes.mark(items, cat)
     vers.mark(items, cat)
     return items
@@ -737,7 +751,8 @@ class SearchBox(QFrame):
 
 KIND_NAME = {"adf": "ADF disk image", "dms": "DMS disk image", "adz": "ADZ disk image",
              "hdf": "HDF hard drive image", "lha": "LHA archive", "lzx": "LZX archive",
-             "zip": "ZIP archive", "folder": "Amiga folder"}
+             "zip": "ZIP archive", "folder": "Amiga folder", "module": "Music module",
+             "kickstart": "Kickstart ROM"}
 DENSITY = {"DD": "double density", "HD": "high density"}
 FS_ISSUE = "filesystem inconsistency, but every file reads: "
 
@@ -845,6 +860,121 @@ class Note(QFrame):
             more.setToolTip("\n".join(lines[self.MAX_LINES:self.MAX_LINES + 40]))
             body.addWidget(more)
         lay.addLayout(body, 1)
+
+
+class FlowLayout(QLayout):
+    """Widgets in a row that wraps onto more lines when there isn't room, so a row of buttons
+    never makes a narrow panel wider than the space it has."""
+
+    def __init__(self, parent=None, spacing=8):
+        super().__init__(parent)
+        self._items = []
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def insertWidget(self, index, widget):
+        self.addChildWidget(widget)
+        self._items.insert(index, QWidgetItem(widget))
+        self.invalidate()
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._place(QRect(0, 0, width, 0), move=False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._place(rect, move=True)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for it in self._items:
+            if not it.isEmpty():
+                size = size.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _place(self, rect, move):
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line = r.x(), r.y(), 0
+        gap = self.spacing()
+        for it in self._items:
+            if it.isEmpty():
+                continue
+            hint = it.sizeHint()
+            if x > r.x() and x + hint.width() > r.right() + 1:
+                x, y, line = r.x(), y + line + gap, 0
+            if move:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + gap
+            line = max(line, hint.height())
+        return y + line - rect.y() + m.bottom()
+
+
+class KeyButton(QPushButton):
+    """A button that shows its keyboard shortcut beside its words, in a small key cap like the
+    search box's "Ctrl F"."""
+
+    def __init__(self, text, keys):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 0, 10, 0)
+        lay.setSpacing(10)
+        self.words = QLabel(text)
+        self.words.setObjectName("buttonWords")
+        native = QKeySequence(keys).toString(QKeySequence.SequenceFormat.NativeText)
+        self.cap = QLabel(native.replace("+", " ") if "+" in native and len(native) > 2 else native)
+        self.cap.setObjectName("keyHint")
+        self.cap.setFont(data_font(11))
+        for w in (self.words, self.cap):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            lay.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._fit()
+
+    def setText(self, text):
+        self.words.setText(text)
+        self._fit()
+
+    def text(self):
+        return self.words.text()
+
+    def setFont(self, font):
+        super().setFont(font)
+        self.words.setFont(font)
+        self._fit()
+
+    def _fit(self):
+        self.setMinimumWidth(self.layout().sizeHint().width())
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.EnabledChange:
+            self.words.setProperty("off", not self.isEnabled())
+            self.words.style().unpolish(self.words)
+            self.words.style().polish(self.words)
+
+    def sizeHint(self):
+        return QSize(self.layout().sizeHint().width(), super().sizeHint().height())
 
 
 class PictureView(QLabel):
@@ -1011,8 +1141,7 @@ class DetailsPanel(QFrame):
         th.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         v.addWidget(self.tree)
 
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
+        buttons = FlowLayout(spacing=8)
         self.fav_btn = QPushButton()
         self.fav_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.fav_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1022,6 +1151,7 @@ class DetailsPanel(QFrame):
         self.show_btn = QPushButton("Show in folder")
         self.show_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.show_btn.setToolTip("Open the folder holding it (Ctrl+Shift+O)")
         self.show_btn.clicked.connect(self.show_in_folder)
         buttons.addWidget(self.show_btn)
         self.play_btn = QPushButton("Play in emulator")
@@ -1036,11 +1166,10 @@ class DetailsPanel(QFrame):
         self.copy_btn = QPushButton("Copy to Gotek stick")
         self.copy_btn.setFont(ui_font(13, QFont.Weight.DemiBold))
         self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.copy_btn.setToolTip("Copy this disk to a USB stick for a Gotek drive")
+        self.copy_btn.setToolTip("Copy this disk to a USB stick for a Gotek drive (Ctrl+G)")
         self.copy_btn.clicked.connect(lambda: on_copy and self.item_id and on_copy(
             list(self.item.members) if self.item is not None and self.item.members else [self.item_id]))
         buttons.addWidget(self.copy_btn)
-        buttons.addStretch(1)
         v.addLayout(buttons)
         v.addStretch(1)
         scroll = QScrollArea()
@@ -1067,6 +1196,51 @@ class DetailsPanel(QFrame):
             out += rows
             todo = [r["id"] for r in rows]
         return out
+
+    def _cover_note(self, item, m):
+        """What is known about a coverdisk: its magazine, issue and disk, and how sure that is."""
+        cd = item.cover
+        what = cd.magazine or "a magazine"
+        if cd.issue:
+            what += f" issue {cd.issue.lstrip('0') or cd.issue}"
+        if cd.date:
+            what += f" ({cd.date})"
+        disk = ""
+        if cd.disk and cd.of and cd.of != "1":
+            disk = f", disk {cd.disk} of {cd.of}"
+        if cd.label and cd.how != "made":
+            disk += f" — {_esc(cd.label)}"
+        tosec = f"<br>TOSEC's name for it: {_esc(cd.tosec_name)}" if cd.tosec_name else ""
+        empty = m["status"] == "empty" or not m["size"]
+        if cd.how == "checksum":
+            self.notes.addWidget(Note(
+                "accent", "ok", f"<b>Coverdisk from {_esc(what)}{disk}.</b> Its checksum matches TOSEC's "
+                f"list of coverdisks exactly, so this is a known good copy.{tosec}"))
+        elif cd.how == "name" and empty:
+            self.notes.addWidget(Note(
+                "warn", "warning", f"<b>Coverdisk from {_esc(what)}{disk}</b> — recognised by its name, "
+                "but this file is empty (0 bytes): the disk's data is missing, so it can't be checked "
+                f"or played. TOSEC lists the disk, so a good copy exists.{tosec}"))
+        elif cd.how == "name":
+            ambiguous = "" if cd.tosec_name else (" The file name doesn't say which of the issue's disks "
+                                                   "it is.")
+            self.notes.addWidget(Note(
+                "neutral", "magazine", f"<b>Coverdisk from {_esc(what)}{disk}</b> — recognised by its "
+                "name. Its checksum isn't the one in TOSEC's list, so it is a different copy of the "
+                "disk, or one that has been changed (written to, or saved with a game's progress)."
+                f"{ambiguous}{tosec}"))
+        elif cd.how == "made":
+            self.notes.addWidget(Note(
+                "neutral", "magazine", f"<b>Made from the coverdisk of {_esc(what)}.</b> It is in a folder "
+                "beside the issue's disks, so it was probably made by one of them (an installer or a "
+                "“create disks” program). TOSEC doesn't list disks like this."
+                + (" This file is empty (0 bytes)." if empty else "")))
+        else:
+            hint = ("" if identify.have_tosec() else " <b>Tools › Identify disks online…</b> downloads "
+                    "TOSEC's lists, to check its issue and disk.")
+            self.notes.addWidget(Note(
+                "neutral", "magazine", f"<b>Coverdisk</b>{' from ' + _esc(what) if cd.magazine else ''}, "
+                f"going by its folder. TOSEC's list of coverdisks doesn't have this one.{hint}"))
 
     def _set_fact(self, name, text, ico=None, color=None):
         pic, val = self.facts[name]
@@ -1267,6 +1441,16 @@ class DetailsPanel(QFrame):
             contents = "No AmigaDOS files" if d["status"] != "empty" else "Nothing"
         else:
             contents = ", ".join(bits)
+        if kind == "kickstart":
+            models = info.get("models") or []
+            bits = [f"Version {info['kickstart']}" if info.get("kickstart") else "Version unknown"]
+            if info.get("rom_size"):
+                bits.append(info["rom_size"])
+            if info.get("machine"):
+                bits.append("made for the " + info["machine"])
+            if models:
+                bits.append("Play in emulator uses it for the " + " and ".join(models))
+            contents = " · ".join(bits)
         self._set_fact("Contents", contents)
 
         kid_status = {k["status"] for k in kids}
@@ -1355,7 +1539,9 @@ class DetailsPanel(QFrame):
                     + "<br>".join(lines), on_link=self._note_link))
         if item.game and not m["whd_name"]:
             self.notes.addWidget(Note("neutral", "game", f"<b>Game</b> — {_esc(item.game)}"))
-        if item.tosec_name and not item.members:
+        if item.cover is not None and not item.members:
+            self._cover_note(item, m)
+        if item.tosec_name and not item.members and not (item.cover and item.cover.how == "checksum"):
             t = vers.tags(item.tosec_name)
             meaning = ("<br>" + "; ".join(f"[{_esc(x)}] {_esc(vers.describe(x))}" for x in t)) if t else ""
             same = not _renamed(item)
@@ -1365,7 +1551,7 @@ class DetailsPanel(QFrame):
                 f"From {_esc(item.identified_by)}." + ("" if same else
                 f" The file is called {_esc(item.file)}; Tools › Rename files to their proper names… "
                 "can rename it (it asks first).")))
-        elif not item.members and not identify.have_list() and \
+        elif not item.members and item.cover is None and not identify.have_list() and \
                 identify.GENERIC_FILE.match(os.path.splitext(item.file)[0].strip()):
             self.notes.addWidget(Note(
                 "accent", None,
@@ -1436,7 +1622,7 @@ class DetailsPanel(QFrame):
                 self.tree.addTopLevelItem(it)
                 it.setFirstColumnSpanned(True)
             self.contents_label.setText("TEXT FOUND ON THE DISK" if texts else "CONTENTS")
-            if not texts and m["status"] != "empty":
+            if not texts and m["status"] != "empty" and m["kind"] != "kickstart":
                 it = QTreeWidgetItem(["Nothing to list."])
                 it.setForeground(0, C["ink-muted"])
                 self.tree.addTopLevelItem(it)
@@ -1878,10 +2064,15 @@ class PictureWorker(QThread):
 
             res = {}
             # The TOSEC list of Amiga disks, if the user agreed to it (once, then every two months).
-            if cat.get_meta(identify.CONSENT, False) and (not identify.have_list() or identify.list_is_old()):
+            tosec = cat.get_meta(identify.TOSEC_CONSENT, False)
+            if (tosec and (not identify.have_tosec() or identify.tosec_is_old())) or (
+                    not tosec and cat.get_meta(identify.CONSENT, False)
+                    and (not identify.have_list() or identify.list_is_old())):
                 try:
-                    self.progress.emit("identify", 0, 0, "")
-                    identify.download(stop, lambda d, t: self.progress.emit("identify", d // 1024, t // 1024, ""))
+                    self.progress.emit("identify", 0, 0, "tosec" if tosec else "")
+                    fetch = identify.download_tosec if tosec else identify.download
+                    fetch(stop, lambda d, t: self.progress.emit("identify", d // 1024, t // 1024,
+                                                                "tosec" if tosec else ""))
                     res["identify_fetched"] = True
                 except pictures.Stopped:
                     pass
@@ -2691,13 +2882,13 @@ class MainWindow(QMainWindow):
         hl.addWidget(mark)
         hl.addLayout(words)
         hl.addStretch(1)
-        self.scan_btn = QPushButton("Scan folder…")
+        self.scan_btn = KeyButton("Scan folder…", "Ctrl+O")
         self.scan_btn.setObjectName("primary")
-        self.scan_btn.setToolTip("Add a folder of Amiga disk images to the catalogue")
-        self.rescan_btn = QPushButton("Rescan")
+        self.scan_btn.setToolTip("Add a folder of Amiga disk images to the catalogue (Ctrl+O)")
+        self.rescan_btn = KeyButton("Rescan", "F5")
         self.rescan_btn.setToolTip("Look again at every folder scanned before: new and changed "
                                    "files are read, deleted ones removed (F5)")
-        self.gotek_btn = QPushButton("Copy to Gotek stick")
+        self.gotek_btn = KeyButton("Copy to Gotek stick", "Ctrl+G")
         self.gotek_btn.setToolTip("Copy the selected disks to a USB stick for a Gotek drive (Ctrl+G). "
                                   "Select several with Ctrl or Shift.")
         self.tv_btn = QPushButton("TurboView")
@@ -3546,23 +3737,26 @@ class MainWindow(QMainWindow):
 
     def identify_online(self):
         """Tools > Identify disks online: download the TOSEC list once (asking first)."""
-        if not self.cat.get_meta(identify.CONSENT, False):
+        if not self.cat.get_meta(identify.TOSEC_CONSENT, False):
             box = QMessageBox(self)
             box.setWindowTitle("Identify disks online")
             box.setIcon(QMessageBox.Icon.Question)
             box.setText("Identify disks by their checksums?")
             box.setInformativeText(
-                "TurboCAT downloads the TOSEC catalogue of Amiga disks that libretro publishes on "
-                "GitHub (about 12 MB, once, refreshed every two months) and looks up each disk's "
-                "checksum in it. A disk called Disk1.adf can then show its proper name, such as "
-                "Superfrog (1993)(Team 17)(Disk 1 of 4).\n\nOnly the list is downloaded: nothing "
-                "about your disks is sent anywhere. Your files are not renamed.")
+                f"TurboCAT downloads TOSEC's catalogue of disks from tosecdev.org (about "
+                f"{identify.PACK_SIZE_MB} MB, once, then about twice a year when TOSEC publishes a new "
+                "one), keeps only its 68 lists of Amiga floppy disks (about 35 MB, close to 100,000 "
+                "disks: games, applications, magazine coverdisks, demos, diskmags…) and looks up each "
+                "disk's checksum in them. A disk called Disk1.adf can then show its proper name, such "
+                "as Superfrog (1993)(Team 17)(Disk 1 of 4), and coverdisks their magazine, issue and "
+                "date.\n\nOnly the lists are downloaded: nothing about your disks is sent anywhere. "
+                "Your files are not renamed.")
             box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-            box.button(QMessageBox.StandardButton.Yes).setText("Download the list")
+            box.button(QMessageBox.StandardButton.Yes).setText("Download the lists")
             if box.exec() != QMessageBox.StandardButton.Yes:
                 return
-            self.cat.set_meta(identify.CONSENT, True)
-        elif identify.have_list() and not identify.list_is_old():
+            self.cat.set_meta(identify.TOSEC_CONSENT, True)
+        elif identify.have_tosec() and not identify.tosec_is_old():
             self.reload()
             n = sum(1 for it in self.all_items if it.tosec_name)
             self.result_label.setText(f"{n:,} disks identified by their checksums (the list is up to date)")
@@ -3644,8 +3838,12 @@ class MainWindow(QMainWindow):
     def _pic_progress(self, phase, i, n, what=""):
         if phase == "identify":
             size = f"{i / 1024:.1f} of {n / 1024:.1f} MB" if n else ""
-            self._pic_bar("Getting the TOSEC list of Amiga disks from GitHub…", i, n,
-                          size or "libretro-database, about 12 MB, once")
+            if what == "tosec":
+                self._pic_bar("Getting TOSEC's lists of Amiga disks from tosecdev.org…", i, n,
+                              size or f"about {identify.PACK_SIZE_MB} MB, once")
+            else:
+                self._pic_bar("Getting the TOSEC list of Amiga disks from GitHub…", i, n,
+                              size or "libretro-database, about 12 MB, once")
             return
         if phase == "online" and not n:
             self._pic_bar("Getting the list of pictures from GitHub…", 0, 0,
@@ -3670,7 +3868,7 @@ class MainWindow(QMainWindow):
         if res.get("identify_fetched"):
             bits.append(f"{res['identified']:,} disks identified by their checksums")
         if res.get("identify_error"):
-            bits.append(f"the TOSEC list couldn't be downloaded: {res['identify_error']}")
+            bits.append(f"TOSEC's lists couldn't be downloaded: {res['identify_error']}")
         if res.get("turboview_error"):
             bits.append(f"TurboView catalogue not written: {res['turboview_error']}")
         if "online" in res and res["online"]["looked"]:
@@ -4043,6 +4241,10 @@ class MainWindow(QMainWindow):
                            selection-background-color: {c['accent']}; }}
             QLabel#keyHint {{ color: {c['ink-muted']}; border: 1px solid {c['control-edge']};
                               border-radius: 4px; padding: 2px 6px; }}
+            QLabel#buttonWords {{ color: {c['ink']}; background: transparent; }}
+            QPushButton#primary QLabel#buttonWords {{ color: {c['on-accent']}; }}
+            QPushButton#primary QLabel#keyHint {{ color: {c['on-accent']}; border-color: {c['on-accent']}; }}
+            QLabel#buttonWords[off="true"] {{ color: {c['ink-muted']}; }}
             #panel {{ border: 1px solid {c['line']}; border-radius: 8px; background: {c['surface']}; }}
             QTableView {{ border: none; background: {c['surface']}; outline: 0; }}
             QHeaderView::section {{ background: {c['chrome']}; color: {c['ink-muted']}; border: none;

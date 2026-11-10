@@ -1,19 +1,25 @@
 """Identify disks by their checksum, whatever the files are called.
 
-A disk image's SHA-1 is looked up in the TOSEC catalogue of Amiga disks: the copy libretro
-publishes on GitHub (about 44,000 disks, downloaded once with the user's agreement and kept in
-~/.cache/turbocat), plus any TOSEC .dat files in the folders TurboCAT has scanned. A match gives
-the disk's proper collector name, e.g. "Disk1.adf" is
-"Superfrog (1993)(Team 17)(Disk 1 of 4)[cr CSL][t +6 SCX].adf".
+A disk image's SHA-1 is looked up in the TOSEC catalogue of Amiga disks. The full set comes from
+TOSEC's own DAT pack (tosecdev.org: about 100 MB, of which only the 68 Amiga floppy lists are kept,
+about 98,000 disks: games, applications, coverdisks, demos, diskmags, collections, Workbench...).
+An older, smaller copy of the games list that libretro publishes on GitHub is still read if it was
+downloaded before. Both are fetched only with the user's agreement and kept in ~/.cache/turbocat,
+plus any TOSEC .dat files in the folders TurboCAT has scanned. A match gives the disk's proper
+collector name, e.g. "Disk1.adf" is "Superfrog (1993)(Team 17)(Disk 1 of 4)[cr CSL][t +6 SCX].adf",
+and the list it is in ("Coverdisks", "Games", "Demos - Music"...).
 
 When nothing matches and the file name says nothing ("Disk1.adf"), the folder it is in may:
 that is offered as a guess only, clearly marked, and never used to rename anything.
 """
+import html
 import json
 import os
 import re
+import shutil
 import time
 import urllib.request
+import zipfile
 
 from .pictures import CACHE, USER_AGENT, Stopped
 
@@ -22,8 +28,20 @@ LIST_URL = ("https://raw.githubusercontent.com/libretro/libretro-database/master
 LIST_TITLE = "the TOSEC list of Amiga disks (libretro)"
 DAT_PATH = os.path.join(CACHE, "tosec-amiga.dat")
 INDEX_PATH = os.path.join(CACHE, "tosec-amiga.json")
-CONSENT = "identify_online"          # meta: the user agreed to download the list
+CONSENT = "identify_online"          # meta: the user agreed to download the libretro list
+# TOSEC's own lists: the DAT pack of the newest release, found on its downloads page.
+TOSEC_PAGE = "https://tosecdev.org/downloads"
+TOSEC_PACK = ("https://tosecdev.org/downloads/category/59-2025-03-13"
+              "?download=117:tosec-dat-pack-complete-4743-tosec-v2025-03-13")     # if the page can't be read
+TOSEC_TITLE = "TOSEC's lists of Amiga disks"
+TOSEC_DIR = os.path.join(CACHE, "tosec")
+TOSEC_INDEX = os.path.join(CACHE, "tosec-index.json")
+TOSEC_CONSENT = "identify_tosec"     # meta: the user agreed to download TOSEC's DAT pack
+TOSEC_KEEP = "TOSEC/Commodore Amiga - "     # the Amiga floppy lists in the pack
+PACK_SIZE_MB = 100
 MAX_AGE = 60 * 86400                 # fetch a fresh copy after two months
+TOSEC_MAX_AGE = 180 * 86400          # TOSEC releases come once or twice a year
+_DAT_ROM = re.compile(r'<rom name="([^"]+)"[^>]*?sha1="([0-9A-Fa-f]{40})"')
 
 _ROM = re.compile(r'rom \( name "((?:[^"\\]|\\.)*)" size \d+[^)]*?sha1 ([0-9A-Fa-f]{40})')
 GENERIC_FILE = re.compile(r"^(disk|disc|df|image|img|adf|untitled|unknown|noname|new|copy of|"
@@ -33,10 +51,15 @@ GENERIC_FOLDER = {"amiga", "adf", "adfs", "disks", "disk", "floppies", "floppy",
                   "new", "old", "stuff", "temp", "tmp", "fs-uae", "amiberry", "roms", "files"}
 
 _index = None          # sha1 -> name, from the downloaded list
+_tosec = None          # sha1 -> (name, list), from TOSEC's own lists
 
 
 def have_list():
-    return os.path.exists(INDEX_PATH) or os.path.exists(DAT_PATH)
+    return have_tosec() or os.path.exists(INDEX_PATH) or os.path.exists(DAT_PATH)
+
+
+def have_tosec():
+    return os.path.isdir(TOSEC_DIR) and any(n.endswith(".dat") for n in os.listdir(TOSEC_DIR))
 
 
 def list_is_old():
@@ -44,6 +67,119 @@ def list_is_old():
         return time.time() - os.path.getmtime(DAT_PATH) > MAX_AGE
     except OSError:
         return True
+
+
+def tosec_is_old():
+    try:
+        return time.time() - os.path.getmtime(TOSEC_INDEX) > TOSEC_MAX_AGE
+    except OSError:
+        return True
+
+
+def _get(url, timeout=20):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(2 << 20).decode("utf-8", "replace")
+
+
+def tosec_pack_url():
+    """The DAT pack of TOSEC's newest release, read from its downloads page (or the last one known)."""
+    try:
+        page = _get(TOSEC_PAGE)
+        releases = re.findall(r'href="(/downloads/category/\d+-(\d{4}-\d{2}-\d{2}))"', page)
+        if releases:
+            path = max(releases, key=lambda r: r[1])[0]
+            page = _get("https://tosecdev.org" + path)
+            m = re.search(r'href="([^"]*\?download=[^"]*dat-pack-complete[^"]*)"', page)
+            if m:
+                return "https://tosecdev.org" + html.unescape(m.group(1))
+    except Exception:
+        pass
+    return TOSEC_PACK
+
+
+def download_tosec(stop=lambda: False, progress=None):
+    """Fetch TOSEC's DAT pack (about 100 MB) in pieces so it can be stopped, keep only the Amiga
+    floppy lists (about 35 MB), delete the pack, and index them."""
+    os.makedirs(CACHE, exist_ok=True)
+    part = os.path.join(CACHE, "tosec-pack.zip.part")
+    req = urllib.request.Request(tosec_pack_url(), headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as out:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                if stop():
+                    raise Stopped()
+                chunk = r.read(1 << 18)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
+        new = TOSEC_DIR + ".new"
+        shutil.rmtree(new, ignore_errors=True)
+        os.makedirs(new)
+        with zipfile.ZipFile(part) as z:
+            for info in z.infolist():
+                name = info.filename
+                if not name.startswith(TOSEC_KEEP) or not name.endswith(".dat") or "/" in name[len("TOSEC/"):]:
+                    continue
+                with z.open(info) as src, open(os.path.join(new, os.path.basename(name)), "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        if not os.listdir(new):
+            raise ValueError("the TOSEC pack has no Amiga lists")
+        shutil.rmtree(TOSEC_DIR, ignore_errors=True)
+        os.replace(new, TOSEC_DIR)
+    finally:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+    _build_tosec()
+
+
+def list_name(file_name):
+    """'Commodore Amiga - Coverdisks - [ADF] (TOSEC-v2024-12-14_CM).dat' -> 'Coverdisks - [ADF]'."""
+    return re.sub(r"^Commodore Amiga - | \(TOSEC-v[^)]*\)\.dat$", "", file_name)
+
+
+def _build_tosec():
+    global _tosec
+    index = {}
+    for f in sorted(os.listdir(TOSEC_DIR)):
+        if not f.endswith(".dat"):
+            continue
+        with open(os.path.join(TOSEC_DIR, f), encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        lst = list_name(f)
+        for name, sha in _DAT_ROM.findall(text):
+            index.setdefault(sha.lower(), (html.unescape(name), lst))
+    with open(TOSEC_INDEX + ".part", "w") as fh:
+        json.dump(index, fh)
+    os.replace(TOSEC_INDEX + ".part", TOSEC_INDEX)
+    _tosec = index
+
+
+def tosec_index():
+    """sha1 -> (TOSEC name, list) from TOSEC's own lists ({} if not downloaded)."""
+    global _tosec
+    if _tosec is None:
+        try:
+            if have_tosec() and not os.path.exists(TOSEC_INDEX):
+                _build_tosec()
+            else:
+                with open(TOSEC_INDEX) as fh:
+                    _tosec = {k: tuple(v) for k, v in json.load(fh).items()}
+        except (OSError, ValueError):
+            _tosec = {}
+    return _tosec
+
+
+def names_in(list_prefix):
+    """Every disk name in the TOSEC lists whose name starts with list_prefix (e.g. 'Coverdisks')."""
+    return [name for name, lst in tosec_index().values() if lst.startswith(list_prefix)]
 
 
 def download(stop=lambda: False, progress=None):
@@ -95,10 +231,11 @@ def index():
 
 
 def identify(rows_by_top, lists=()):
-    """{top id: (TOSEC name, where the name came from)} for items whose disk is known.
+    """{top id: (TOSEC name, where the name came from, TOSEC list)} for items whose disk is known.
     rows_by_top: {top id: [media rows of the item and everything inside it]};
     lists: datlists.CollectionList objects (TOSEC .dat files found in the scanned folders)."""
     known = index()
+    tosec = tosec_index()
     dats = [l for l in lists if l.kind == "dat"]
     out = {}
     for top, rows in rows_by_top.items():
@@ -108,11 +245,14 @@ def identify(rows_by_top, lists=()):
                 continue
             for lst in dats:
                 if sha in lst.by_sha1:
-                    out[top] = (lst.by_sha1[sha], lst.title)
+                    out[top] = (lst.by_sha1[sha], lst.title, lst.title)
                     break
             else:
-                if sha in known:
-                    out[top] = (known[sha], LIST_TITLE)
+                if sha in tosec:
+                    name, which = tosec[sha]
+                    out[top] = (name, f"TOSEC's {which} list", which)
+                elif sha in known:
+                    out[top] = (known[sha], LIST_TITLE, "Games")
             if top in out:
                 break
     return out

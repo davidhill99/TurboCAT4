@@ -50,7 +50,12 @@ def version_key(path):
 
 
 def name_of(item):
-    """The identified TOSEC name if there is one, else the file's own path."""
+    """The identified TOSEC name if there is one, else the file's own path. A coverdisk known only
+    by its magazine and issue goes by that, so "Created Disk 1.adf" from two issues isn't taken
+    for two versions of one disk."""
+    cover = getattr(item, "cover", None)
+    if not getattr(item, "tosec_name", "") and cover is not None and cover.magazine:
+        return cover.tosec_name or f"{cover.title()} {os.path.basename(item.path)}"
     return getattr(item, "tosec_name", "") or item.path
 
 

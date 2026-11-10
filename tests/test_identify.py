@@ -29,11 +29,15 @@ class IdentifyTest(unittest.TestCase):
         identify.DAT_PATH = os.path.join(self.tmp.name, "list.dat")
         identify.INDEX_PATH = os.path.join(self.tmp.name, "list.json")
         identify._index = None
+        identify.TOSEC_DIR = os.path.join(self.tmp.name, "tosec")        # no TOSEC lists here
+        identify.TOSEC_INDEX = os.path.join(self.tmp.name, "tosec.json")
+        identify._tosec = None
         with open(identify.DAT_PATH, "w") as f:
             f.write(DAT)
 
     def tearDown(self):
         identify._index = None
+        identify._tosec = None
         self.tmp.cleanup()
 
     def test_a_disk_is_known_by_its_checksum_whatever_its_name(self):

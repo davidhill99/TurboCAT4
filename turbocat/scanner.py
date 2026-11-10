@@ -3,7 +3,7 @@
 import hashlib
 import os
 
-from . import music, readers, whdload
+from . import emulator, music, readers, whdload
 from .catalogue import BLANK_SHA1
 from .readers import detect, ContainerResult
 
@@ -34,6 +34,8 @@ def analyse_container(kind, data, name, source, depth, catalogue, parent_id, num
             res = readers.read_folder(path_on_disk)
         elif kind == "module":
             res = readers.read_module(data, name)
+        elif kind == "kickstart":
+            res = readers.read_kickstart(data, path_on_disk or "")
         elif kind == "extadf":
             res = ContainerResult("extadf")
             res.warnings.append("extended ADF (MFM/copy-protected) not supported yet")
@@ -190,6 +192,8 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
             summary["ignored"] += 1
             continue
         kind = detect(path, head[:1024], size)
+        if kind is None and emulator.looks_like_rom(head, size):
+            kind = "kickstart"       # a Kickstart ROM: Play in emulator and TurboView use these
         if kind is None and music.identify(os.path.basename(path), head):
             kind = "module"          # a tune on its own, straight from a PC folder
         if kind is None:
