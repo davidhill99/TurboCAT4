@@ -70,6 +70,24 @@ What changed in each release, newest first. Work not yet in a numbered release i
   again, once, the items that couldn't be read without it, even though their files haven't changed.
   Before, they stayed "unreadable" until rechecked by hand
 
+- **Setup button** on the toolbar, with a green, amber or red mark: hover for what isn't working,
+  click for Check setup. Check setup now starts with **What works** on this computer, feature by
+  feature (reading disks, LHA, DMS, music, playing disks, TurboView, Gotek, repair, proper names),
+  in terms of your collection — e.g. a missing xdms only matters if you have DMS images, and
+  missing Kickstarts say how many AGA and ECS disks need them (hover for more). The parts list
+  follows, with how to get each missing one
+- Kickstart ROMs: every ROM found is listed, AROS is called what it is (a free replacement, not a
+  real Kickstart), and TurboCAT also looks where Windows (Amiga Forever's `Amiga Files/Shared/rom`)
+  and macOS (Amiberry's folders) keep them
+- Helper programs (lha, xdms, 7z) are looked for in a `bin` folder that comes with TurboCAT before
+  the system's, so the Windows and macOS packages can include their own copies
+- File > Scan folders… shows your folders as a tree with tick boxes, like a cloud drive's
+  selective sync: ticked folders are scanned with everything inside them, unticked ones are left
+  out, and a half tick means some folders inside are left out (a folder inside an unticked one can
+  still be ticked). Each folder shows how many catalogue items came from it. On Save, if unticked
+  folders hold catalogued items, TurboCAT asks whether to keep them or take them out; files on disk
+  are never touched. Drives and network shares that are plugged in are listed too
+
 ## 4.0.0-alpha.4 — 8–10 Nov 2026
 
 - Desktop window (`tc window`): the catalogue list with search, and a details panel for the selected item — facts, problems and warnings, duplicates (click to jump to the other copy), WHDLoad details, the full contents list or the text found on a non-DOS disk, and Show in folder

@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import time
+from . import folders
 
 # Images with no data all share a fingerprint, so they would show up as "duplicates"
 # of each other: an empty file, and blank (all-zero) DD and HD disks.
@@ -379,7 +380,39 @@ class Catalogue:
         return self._outermost(found)
 
     def add_scan_roots(self, paths):
-        self.set_meta("roots", self._outermost(list(self.scan_roots()) + list(paths)))
+        self.set_meta("roots", folders.tidy(list(self.scan_roots()) + list(paths),
+                                            self.skipped_folders())[0])
+
+    def skipped_folders(self):
+        """Folders inside scanned ones that scanning leaves out."""
+        return list(self.get_meta("skip", []))
+
+    def selection(self):
+        """Which folders are scanned, as a folders.Selection (File > Scan folders…)."""
+        return folders.Selection(self.scan_roots(), self.skipped_folders())
+
+    def save_selection(self, sel):
+        self.set_meta("roots", list(sel.roots))
+        self.set_meta("skip", list(sel.skips))
+
+    def top_sources(self):
+        return [r["source"] for r in self.db.execute("SELECT source FROM media WHERE parent_id IS NULL")]
+
+    def count_under(self, path):
+        """How many disks, archives and folders in the catalogue came from this folder."""
+        path = folders.norm(path)
+        return sum(1 for s in self.top_sources() if folders.within(s, path))
+
+    def forget(self, sources):
+        """Take these items (by file or folder path) out of the catalogue; the files on disk
+        are not touched. Returns how many went."""
+        sources = set(sources)
+        ids = [r["id"] for r in self.db.execute("SELECT id, source FROM media WHERE parent_id IS NULL")
+               if r["source"] in sources]
+        for i in ids:
+            self.db.execute("DELETE FROM media WHERE id=?", (i,))
+        self.db.commit()
+        return len(ids)
 
     def remove_missing(self, roots):
         """Drop items whose file has gone, but only under roots that still exist

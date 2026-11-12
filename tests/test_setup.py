@@ -50,9 +50,6 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(important, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class DisplayTest(unittest.TestCase):
     def test_screen_choices_for_each_emulator(self):
@@ -64,3 +61,62 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("--fullscreen=1", emulator.display_args("fs-uae", "fullscreen"))
         cmd = emulator.command("amiberry", ["amiberry"], "A500", None, ["/x/a.adf"], display="fullscreen")
         self.assertIn("gfx_fullscreen_amiga=fullwindow", cmd)
+
+
+class FeatureTest(unittest.TestCase):
+    """What works, feature by feature, and what that means for this collection."""
+
+    def feats(self, missing=(), imp=None, roms=None):
+        cs = [setup.Check(n, "", setup.MISSING if n in missing else setup.OK) for n in (
+            "amitools", "lhafile", "lha (lhasa)", "xdms", "Qt Multimedia", "libopenmpt", "libxmp",
+            "Amiga emulator", "Kickstart ROMs", "TurboView", "List of Amiga disks")]
+        return {f.name: f for f in setup.features(cs, imp or {}, roms or {})}
+
+    def test_everything_works(self):
+        roms = {"A500": "a", "A600": "b", "A1200": "c"}
+        f = self.feats(roms=roms)
+        self.assertEqual({x.status for x in f.values()}, {setup.OK})
+        self.assertEqual(setup.overall(list(f.values())), setup.OK)
+
+    def test_a_missing_part_matters_only_if_the_collection_needs_it(self):
+        f = self.feats(missing=("xdms",), imp={"dms": 0})
+        self.assertEqual(f["DMS disk images"].status, setup.OK)          # no DMS images: not needed
+        f = self.feats(missing=("xdms",), imp={"dms": 9})
+        self.assertEqual(f["DMS disk images"].status, setup.MISSING)
+        self.assertIn("9 DMS images", f["DMS disk images"].effect)
+        self.assertEqual(f["Copying to a Gotek stick"].status, setup.PARTIAL)
+
+    def test_kickstarts_say_how_many_disks_need_them(self):
+        f = self.feats(imp={"A1200": 31, "A600": 0}, roms={"A500": "x"})
+        e = f["Playing disks in an emulator"]
+        self.assertEqual(e.status, setup.PARTIAL)
+        self.assertIn("31 AGA disks in your collection need an A1200 Kickstart 3.x", e.detail)
+        self.assertNotIn("ECS", e.detail)
+
+    def test_no_emulator(self):
+        f = self.feats(missing=("Amiga emulator",))
+        self.assertEqual(f["Playing disks in an emulator"].status, setup.MISSING)
+        self.assertEqual(f["TurboView"].status, setup.MISSING)
+        self.assertEqual(setup.overall(list(f.values())), setup.MISSING)
+
+
+class BundledToolTest(unittest.TestCase):
+    """Windows and macOS packages carry their own lha and xdms in a bin folder, found first."""
+
+    def test_bundled_copy_comes_first(self):
+        import tempfile
+        from turbocat import tools
+        with tempfile.TemporaryDirectory() as d:
+            exe = os.path.join(d, "xdms")
+            with open(exe, "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(exe, 0o755)
+            with mock.patch.object(tools, "bundled_dirs", return_value=[d]):
+                self.assertEqual(tools.which("xdms"), exe)
+            with mock.patch.object(tools, "bundled_dirs", return_value=[]), \
+                    mock.patch("shutil.which", return_value="/usr/bin/xdms"):
+                self.assertEqual(tools.which("xdms"), "/usr/bin/xdms")
+
+
+if __name__ == "__main__":
+    unittest.main()

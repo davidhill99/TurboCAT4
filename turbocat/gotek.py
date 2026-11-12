@@ -15,6 +15,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass, field
 
+from . import tools
 from .readers import DD_SIZE, HD_SIZE
 
 FLOPPY_KINDS = ("adf", "adz", "dms")
@@ -118,7 +119,7 @@ def plan(cat, top_ids):
                 p.skipped.append((top["number"], os.path.basename(src),
                                   "empty: a 0-byte file" if not r["size"] else "blank disk, nothing on it"))
                 continue
-            if r["kind"] == "dms" and not shutil.which("xdms"):
+            if r["kind"] == "dms" and not tools.which("xdms"):
                 p.skipped.append((top["number"], os.path.basename(src),
                                   "DMS, and the 'xdms' tool is not installed to unpack it"))
                 continue
@@ -159,7 +160,7 @@ def _unpack_floppy(kind, data):
         return data
     if kind == "adz":
         return gzip.decompress(data)
-    exe = shutil.which("xdms")
+    exe = tools.which("xdms")
     with tempfile.TemporaryDirectory() as td:
         src, dst = os.path.join(td, "in.dms"), os.path.join(td, "out.adf")
         with open(src, "wb") as f:

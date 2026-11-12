@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from . import bootblock, lzx
+from . import bootblock, lzx, tools
 
 DD_SIZE, HD_SIZE = 901120, 1802240
 AMIGA_EPOCH = datetime.datetime(1978, 1, 1)
@@ -211,7 +211,7 @@ def read_adf(data: bytes, kind="adf", validate=True) -> ContainerResult:
 # ---------------------------------------------------------------- DMS / ADZ
 
 def read_dms(data: bytes) -> ContainerResult:
-    exe = shutil.which("xdms")
+    exe = tools.which("xdms")
     if not exe:
         r = ContainerResult("dms")
         r.warnings.append("DMS not unpacked: the 'xdms' tool is not installed")
@@ -340,7 +340,7 @@ HELPER_TOOLS = {"7z": "LHA archive unreadable", "lha": "LHA archive unreadable",
 
 def helper_tools():
     """The helper programs installed on this computer."""
-    return sorted(t for t in HELPER_TOOLS if shutil.which(t))
+    return sorted(t for t in HELPER_TOOLS if tools.which(t))
 
 
 # What to install to fix an item with one of these messages: (message start, program, package)
@@ -354,7 +354,7 @@ def local_fixes(messages):
     out = []
     for start, prog, pkg in LOCAL_FIXES:
         if any(start in m for m in messages):
-            out.append((prog, pkg, shutil.which(prog) is not None))
+            out.append((prog, pkg, tools.which(prog) is not None))
     return out
 
 
@@ -362,7 +362,7 @@ def _lha_with_tool(data):
     """Open an LHA archive with 7-Zip or lha, for the old ones lhafile can't read (the -lh1- method
     of 1990-91, header variants). Returns a list of FileEntry, or None if no tool could."""
     for tool, args, run_in in LHA_TOOLS:
-        exe = shutil.which(tool)
+        exe = tools.which(tool)
         if not exe:
             continue
         with tempfile.TemporaryDirectory(prefix="turbocat-lha-") as tmp:

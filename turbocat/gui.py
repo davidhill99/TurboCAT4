@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from PySide6.QtCore import (QAbstractTableModel, QIODevice, QItemSelectionModel, QModelIndex,
                             QEvent, QObject, QPoint, QRect, QRectF, QSize, QSortFilterProxyModel, Qt, QThread, QTimer,
-                            QUrl, Signal)
+                            QStorageInfo, QUrl, Signal)
 from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QAction, QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
@@ -34,7 +34,7 @@ from . import APP_NAME, VERSION
 from . import explain, readers, repair
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
-from . import coverdisks, datlists, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
+from . import coverdisks, datlists, folders, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
 from .scanner import BIG_ARCHIVE, recheck, rescan_all, scan
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
@@ -3191,6 +3191,200 @@ class GotekDialog(QDialog):
         super().reject()
 
 
+class ScanFoldersDialog(QDialog):
+    """File > Scan folders…: a folder tree with tick boxes, like a cloud drive's selective sync.
+    Ticked folders are scanned with everything in them; unticked ones are left out; a half tick
+    means some folders inside are left out. Nothing changes until Save; files are never touched."""
+
+    PATH = Qt.ItemDataRole.UserRole
+
+    def __init__(self, parent, cat):
+        super().__init__(parent)
+        self.setWindowTitle("Scan folders")
+        self.resize(720, 620)
+        self.cat = cat
+        self.old = cat.selection()
+        self.sel = cat.selection()
+        self.sources = [folders.norm(s) for s in cat.top_sources()]
+        self.changed = False
+        self.rescan = False
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(10)
+        head = QLabel("Choose the folders TurboCAT scans")
+        head.setFont(ui_font(16, QFont.Weight.DemiBold))
+        v.addWidget(head)
+        note = _wrap_label("Ticked folders are scanned, with every folder inside them. Untick a folder to "
+                           "leave it out. A half tick means some folders inside are left out.",
+                           ui_font(13), "muted")
+        note.setToolTip("Changing this never moves, changes or deletes your files.")
+        v.addWidget(note)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Folder", "In catalogue"])
+        self.tree.setUniformRowHeights(True)
+        hdr = self.tree.header()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        v.addWidget(self.tree, 1)
+        self.summary = QLabel()
+        self.summary.setObjectName("muted")
+        v.addWidget(self.summary)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("Save")
+        save.setDefault(True)
+        save.clicked.connect(self._save)
+        row.addWidget(cancel)
+        row.addWidget(save)
+        v.addLayout(row)
+
+        for path, label in self._tops():
+            self.tree.addTopLevelItem(self._node(path, label))
+        self.tree.itemExpanded.connect(self._expand)
+        self.tree.itemChanged.connect(self._clicked)
+        for p in self.sel.roots + self.sel.skips:
+            self._reveal(p)
+        self._paint()
+
+    # ---- the tree
+    def _tops(self):
+        """Home, then mounted drives (USB sticks, other disks, network shares), then any scanned
+        folder outside those (an unplugged drive shows as not found)."""
+        home = folders.norm("~")
+        tops = [(home, f"Home ({home})")]
+        for vol in QStorageInfo.mountedVolumes():
+            p = folders.norm(vol.rootPath())
+            win_drive = len(p) <= 3 and p[1:2] == ":"
+            if not (win_drive or p.startswith(("/media/", "/mnt/", "/run/media/", "/Volumes/"))):
+                continue
+            if not vol.isValid() or not vol.isReady() or any(folders.within(p, t) for t, _ in tops):
+                continue
+            tops.append((p, f"{vol.displayName() or os.path.basename(p) or p} ({p})"))
+        for p in self.sel.roots + self.sel.skips:
+            if not any(folders.within(p, t) for t, _ in tops):
+                tops.append((p, p + ("" if os.path.exists(p) else "   (not found: unplugged or moved?)")))
+        return tops
+
+    @staticmethod
+    def _subfolders(path):
+        try:
+            with os.scandir(path) as it:
+                names = [e.name for e in it if e.is_dir(follow_symlinks=False)
+                         and not e.name.startswith((".", "$"))]
+        except OSError:
+            return []
+        return sorted(names, key=str.lower)
+
+    def _node(self, path, label=None):
+        it = QTreeWidgetItem([label or os.path.basename(path) or path, ""])
+        it.setData(0, self.PATH, path)
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        it.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        n = sum(1 for s in self.sources if folders.within(s, path))
+        it.setText(1, f"{n:,}" if n else "")
+        if os.path.isdir(path) and readers.looks_like_amiga_folder(path):
+            it.setToolTip(0, "An Amiga folder: catalogued as one disk, with everything in it")
+        elif self._subfolders(path):
+            it.addChild(QTreeWidgetItem([""]))        # placeholder until opened
+        return it
+
+    def _expand(self, item):
+        if item.childCount() == 1 and item.child(0).data(0, self.PATH) is None:
+            item.takeChild(0)
+            path = item.data(0, self.PATH)
+            self.tree.blockSignals(True)
+            for name in self._subfolders(path):
+                item.addChild(self._node(os.path.join(path, name)))
+            self.tree.blockSignals(False)
+            self._paint(item)
+
+    def _reveal(self, path):
+        """Open the tree down to this folder, so the ticks that matter are in view."""
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            while it is not None and folders.inside(path, it.data(0, self.PATH)):
+                it.setExpanded(True)
+                nxt = None
+                for j in range(it.childCount()):
+                    c = it.child(j)
+                    cp = c.data(0, self.PATH)
+                    if cp and folders.within(path, cp):
+                        nxt = c
+                        break
+                it = nxt
+
+    def _items(self, top=None):
+        stack = [top] if top else [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            it = stack.pop()
+            if it.data(0, self.PATH):
+                yield it
+            stack.extend(it.child(j) for j in range(it.childCount()))
+
+    def _paint(self, top=None):
+        marks = {"on": Qt.CheckState.Checked, "part": Qt.CheckState.PartiallyChecked,
+                 "off": Qt.CheckState.Unchecked}
+        self.tree.blockSignals(True)
+        for it in self._items(top):
+            it.setCheckState(0, marks[self.sel.state(it.data(0, self.PATH))])
+        self.tree.blockSignals(False)
+        gone = len(self._gone())
+        n = len(self.sel.roots)
+        text = f"Scanning {n} folder{'s' if n != 1 else ''}" if n else "Nothing is ticked: Rescan has nothing to scan"
+        if self.sel.skips:
+            k = len(self.sel.skips)
+            text += f", leaving out {k} folder{'s' if k != 1 else ''} inside"
+        text += "."
+        if gone:
+            text += f" Unticked folders hold {gone:,} item{'s' if gone != 1 else ''} in the catalogue."
+        self.summary.setText(text)
+
+    def _clicked(self, item, col):
+        if col != 0:
+            return
+        path = item.data(0, self.PATH)
+        if not path:
+            return
+        if item.checkState(0) == Qt.CheckState.Checked:
+            self.sel.tick(path)
+        else:
+            self.sel.untick(path)
+        self._paint()
+
+    # ---- saving
+    def _gone(self):
+        return [s for s in self.sources if self.old.included(s) and not self.sel.included(s)]
+
+    def _save(self):
+        gone = self._gone()
+        if gone:
+            box = QMessageBox(self)
+            box.setWindowTitle("Scan folders")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(f"The folders you've unticked hold <b>{len(gone):,}</b> item"
+                        f"{'s' if len(gone) != 1 else ''} in the catalogue. Keep them, or take them out?")
+            box.setInformativeText("Either way, the files themselves stay where they are. Kept items stay "
+                                   "as they are now: a Rescan won't update them or notice if they're deleted.")
+            remove = box.addButton("Take them out", QMessageBox.ButtonRole.DestructiveRole)
+            keep = box.addButton("Keep them", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(keep)
+            box.exec()
+            if box.clickedButton() not in (remove, keep):
+                return
+            if box.clickedButton() is remove:
+                self.cat.forget(gone)
+        self.cat.save_selection(self.sel)
+        self.changed = (self.sel.roots, self.sel.skips) != (self.old.roots, self.old.skips) or bool(gone)
+        self.rescan = self.sel.gains(self.old)
+        self.accept()
+
+
 class SetupDialog(QDialog):
     """Help > Check setup: each part TurboCAT uses, whether it is here, and how to get it."""
 
@@ -3236,18 +3430,53 @@ class SetupDialog(QDialog):
             self.checks = setupcheck.run()
         finally:
             QApplication.restoreOverrideCursor()
-        headline, _ = setupcheck.summary(self.checks)
-        self.head.setText(headline)
-        self.sub.setText(f"On this computer ({setupcheck.platform_name()}). Parts marked ✗ are missing; "
-                         "each says what doesn't work without it and how to get it.")
+        win = self.parent()
+        self.feats = (win.setup_features(self.checks) if hasattr(win, "setup_features")
+                      else setupcheck.features(self.checks))
+        gaps = [f for f in self.feats if f.status != setupcheck.OK]
+        self.head.setText("Everything works on this computer." if not gaps else
+                          f"{len(gaps)} feature{'s' if len(gaps) > 1 else ''} not fully working yet")
+        self.sub.setText(f"On this computer ({setupcheck.platform_name()}). First what works, then the "
+                         "parts TurboCAT uses: each missing part says how to get it.")
         body = QWidget()
         lay = QVBoxLayout(body)
         lay.setContentsMargins(0, 4, 8, 4)
         lay.setSpacing(8)
+        lay.addWidget(self._section("WHAT WORKS"))
+        for f in self.feats:
+            lay.addWidget(self._feature_row(f))
+        lay.addSpacing(10)
+        lay.addWidget(self._section("THE PARTS TURBOCAT USES"))
         for c in self.checks:
             lay.addWidget(self._row(c))
         lay.addStretch(1)
         self.area.setWidget(body)
+
+    def _section(self, text):
+        lab = QLabel(text)
+        lab.setObjectName("muted")
+        lab.setFont(ui_font(12, QFont.Weight.DemiBold))
+        return lab
+
+    def _feature_row(self, f):
+        """One line per feature: a mark, its name, and what that means for this collection."""
+        row = QFrame()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(4, 2, 4, 2)
+        h.setSpacing(10)
+        pic = QLabel()
+        ico = {setupcheck.OK: "ok", setupcheck.PARTIAL: "warning"}.get(f.status, "problem")
+        pic.setPixmap(icon(ico if f.important or f.status == setupcheck.OK else "warning", 18))
+        pic.setFixedSize(18, 18)
+        h.addWidget(pic, 0, Qt.AlignmentFlag.AlignTop)
+        text = _wrap_label(f"<b>{_esc(f.name)}</b> — {_esc(f.effect)}"
+                           + (" <i>(hover for more)</i>" if f.detail else ""), ui_font(13))
+        text.setTextFormat(Qt.TextFormat.RichText)
+        h.addWidget(text, 1)
+        missing = [c.name for c in self.checks if c.name in f.needs and c.status != setupcheck.OK]
+        row.setToolTip((f.detail + "\n\n" if f.detail else "") + "Uses: " + ", ".join(f.needs) + (
+            "\nMissing: " + ", ".join(missing) + " (see below for how to get it)" if missing else ""))
+        return row
 
     def _row(self, c):
         box = QFrame()
@@ -3574,10 +3803,15 @@ class MainWindow(QMainWindow):
         self.online_btn.setToolTip("Look up title screens for disks that have no picture of their own, "
                                    "in the libretro-thumbnails collection on GitHub, and magazine covers for "
                                    "coverdisks on the Internet Archive")
-        for b in (self.scan_btn, self.rescan_btn, self.gotek_btn, self.online_btn, self.tv_btn):
+        self.setup_btn = QPushButton("Setup")
+        self.setup_btn.setIcon(QIcon(icon("ok", 16)))
+        self.setup_btn.setToolTip("What works on this computer, and what to install for the rest")
+        for b in (self.scan_btn, self.rescan_btn, self.gotek_btn, self.online_btn, self.tv_btn,
+                  self.setup_btn):
             b.setFont(ui_font(14, QFont.Weight.DemiBold))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             hl.addWidget(b)
+        self.setup_btn.clicked.connect(self.check_setup)
         self.scan_btn.clicked.connect(self.scan_folder)
         self.rescan_btn.clicked.connect(self.rescan)
         self.gotek_btn.clicked.connect(lambda: self.copy_to_gotek())
@@ -3927,6 +4161,9 @@ class MainWindow(QMainWindow):
                             "Add a folder of Amiga disk images to the catalogue")
         self.act_rescan = add(m, "&Rescan", self.rescan, "F5",
                               "Look again at every folder scanned before")
+        self.act_folders = add(m, "Scan f&olders…", self.manage_scan_folders, None,
+                               "See the folders TurboCAT scans; stop scanning one, or leave out a folder "
+                               "inside one")
         m.addSeparator()
         add(m, "&Export tune list…", self.export_tune_list, None,
             "Save every tune found as a spreadsheet")
@@ -4186,7 +4423,26 @@ class MainWindow(QMainWindow):
         dlg.exec()
         missing = sorted(c.name for c in dlg.checks if c.status != setupcheck.OK and c.important)
         self.cat.set_meta("setup_seen", missing)
+        self._show_setup_status(dlg.feats)
         dlg.deleteLater()
+
+    def setup_features(self, checks):
+        try:
+            imp = setupcheck.impact(self.cat)
+        except Exception:
+            imp = {}
+        return setupcheck.features(checks, imp, emulator.find_kickstarts())
+
+    def _show_setup_status(self, feats):
+        """The toolbar's Setup button: a green, amber or red mark, and what isn't working on hover."""
+        state = setupcheck.overall(feats)
+        self.setup_btn.setIcon(QIcon(icon({setupcheck.OK: "ok", setupcheck.PARTIAL: "warning"}.get(
+            state, "problem"), 16)))
+        gaps = [f for f in feats if f.status != setupcheck.OK]
+        self.setup_btn.setToolTip(
+            "Everything works on this computer." if not gaps else
+            "Not everything works yet:\n" + "\n".join(f"• {f.name}: {f.effect}" for f in gaps)
+            + "\n\nClick for what to install.")
 
     def _setup_on_start(self):
         """Once, if something important is missing (and again if what is missing changes)."""
@@ -4194,6 +4450,7 @@ class MainWindow(QMainWindow):
             checks = setupcheck.run(music_versions=music.versions())
         except Exception:
             return
+        self._show_setup_status(self.setup_features(checks))
         missing = sorted(c.name for c in checks if c.status != setupcheck.OK and c.important)
         if missing and missing != self.cat.get_meta("setup_seen"):
             self.check_setup()
@@ -4320,7 +4577,25 @@ class MainWindow(QMainWindow):
         start = (self.cat.scan_roots() or [os.path.expanduser("~")])[0]
         folder = QFileDialog.getExistingDirectory(self, "Scan a folder of Amiga disk images", start)
         if folder:
+            sel = self.cat.selection()          # ticks it in Scan folders, even if it was left out
+            sel.tick(folder)
+            self.cat.save_selection(sel)
             self._start_scan([folder], f"Scanning {folder}…")
+
+    def manage_scan_folders(self):
+        """File > Scan folders…: change which folders are scanned, then scan any added back."""
+        if self.worker is not None:
+            self.result_label.setText("Wait for the scan to finish, then change the scan folders.")
+            return
+        dlg = ScanFoldersDialog(self, self.cat)
+        dlg.exec()
+        if not dlg.changed:
+            return
+        self.reload()
+        if dlg.rescan:
+            self.rescan()                      # unchanged files are skipped, so this is quick
+        else:
+            self.result_label.setText("Scan folders saved.")
 
     def rescan(self):
         roots = self.cat.scan_roots()
@@ -4732,6 +5007,9 @@ class MainWindow(QMainWindow):
                 bits.append(f"{len(s['removed']):,} removed (files deleted)")
             if s.get("missing"):
                 bits.append(f"{len(s['missing'])} folder(s) not found")
+            if s.get("left_out"):
+                n = len(s["left_out"])
+                bits.append(f"{n} folder{'s' if n > 1 else ''} left out (File > Scan folders)")
             msg = ("Recheck finished: " if getattr(self, "rechecking", False) else "Scan finished: ") \
                 + ", ".join(bits) + "."
             if s.get("held_back"):

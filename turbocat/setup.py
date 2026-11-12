@@ -11,6 +11,8 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 
+from . import tools as helpers
+
 OK, PARTIAL, MISSING = "ok", "partial", "missing"
 
 
@@ -85,7 +87,7 @@ def run(emulators=None, kickstarts=None, music_versions=None):
     except Exception:
         out.append(Check("lhafile", "Opens LHA archives (WHDLoad games and most PD archives)", MISSING,
                          without="LHA archives are catalogued but not opened", command=_pip("lhafile")))
-    tools = [t for t in ("7z", "lha") if shutil.which(t)]
+    tools = [t for t in ("7z", "lha") if helpers.which(t)]
     has_lha = "lha" in tools                 # only lha reads -lh1-; 7-Zip helps with header types
     out.append(Check(
         "lha (lhasa)", "Opens older LHA archives the built-in reader can't (the -lh1- method of "
@@ -97,7 +99,7 @@ def run(emulators=None, kickstarts=None, music_versions=None):
                                            "pacman": "p7zip lhasa", "mac": "p7zip lhasa",
                                            "windows": "7zip.7zip"}, s),
         important=False))
-    xdms = shutil.which("xdms")
+    xdms = helpers.which("xdms")
     out.append(Check(
         "xdms", "Unpacks DMS disk images", OK if xdms else MISSING, xdms or "",
         without="" if xdms else "DMS images can't be read or copied to a Gotek",
@@ -162,16 +164,24 @@ def run(emulators=None, kickstarts=None, music_versions=None):
     roms = kickstarts if kickstarts is not None else emulator.find_kickstarts()
     models = ("A500", "A600", "A1200")
     have = [m for m in models if m in roms]
-    where = ", ".join(emulator.ROM_DIRS[:2]) + "…"
+    where = {"windows": "Documents\\FS-UAE\\Kickstarts, or Amiga Forever's Amiga Files\\Shared\\rom folder",
+             "mac": "Documents/FS-UAE/Kickstarts or Amiberry's roms folder"}.get(
+        s, ", ".join(emulator.ROM_DIRS[:2]) + "…")
+    try:
+        listed = emulator.kickstart_list()
+    except Exception:
+        listed = []
+    names = "; ".join(dict.fromkeys(name for _p, name, _m in listed))
     if len(have) == len(models):
         out.append(Check("Kickstart ROMs", "The Amiga's built-in software, needed to start most disks", OK,
-                         "found for " + ", ".join(have)))
+                         "found for " + ", ".join(have) + (f" ({names})" if names else "")))
     else:
         missing = [m for m in models if m not in roms]
         out.append(Check(
             "Kickstart ROMs", "The Amiga's built-in software, needed to start most disks",
             PARTIAL if have else MISSING,
-            ("found for " + ", ".join(have) + "; " if have else "") + "none for " + ", ".join(missing),
+            ("found for " + ", ".join(have) + "; " if have else "") + "none for " + ", ".join(missing)
+            + (f". Found: {names}" if names else ""),
             without="The emulator falls back on its own free replacement (AROS), which some disks "
                     "don't work with",
             url="https://www.amigaforever.com",
@@ -196,6 +206,136 @@ def run(emulators=None, kickstarts=None, music_versions=None):
                                                   "(about 12 MB, it asks first).",
                      important=False, tags=["identify"]))
     return out
+
+
+# ---------------------------------------------------------------- what works, feature by feature
+
+@dataclass
+class Feature:
+    name: str
+    status: str                  # OK, PARTIAL or MISSING
+    effect: str                  # in plain words: what works, or what doesn't and for how many disks
+    needs: list = field(default_factory=list)    # the Check names it depends on
+    important: bool = True
+    detail: str = ""             # the longer story, shown on hover
+
+
+def impact(cat):
+    """How much of this collection each optional part matters for (catalogue queries only)."""
+    from . import emulator
+    q = lambda sql: cat.db.execute(sql).fetchone()[0]
+    out = {
+        "dms": q("SELECT COUNT(*) FROM media WHERE kind='dms'"),
+        "dms_unread": q("SELECT COUNT(*) FROM media WHERE warnings LIKE '%DMS not unpacked%'"),
+        "lha_unread": q("SELECT COUNT(*) FROM media WHERE problems LIKE '%LHA archive unreadable%'"),
+        "modules": q("SELECT COUNT(*) FROM media WHERE kind='module'"),
+        "disks": 0, "A1200": 0, "A600": 0,
+    }
+    for r in cat.db.execute("SELECT source, kind FROM media WHERE parent_id IS NULL "
+                            "AND kind NOT IN ('module', 'kickstart', 'folder') AND status != 'empty'"):
+        out["disks"] += 1
+        model = emulator.guess_model([os.path.basename(r["source"])])
+        if model in ("A1200", "A600"):
+            out[model] += 1
+    return out
+
+
+def features(checks, imp=None, roms=None):
+    """What works on this computer, feature by feature, worded for the user. imp: impact(cat);
+    roms: emulator.find_kickstarts() ({model: path})."""
+    c = {x.name: x for x in checks}
+    ok = lambda name: name in c and c[name].status == OK
+    imp = imp or {}
+    roms = roms or {}
+    n = lambda k: imp.get(k, 0)
+    out = []
+
+    out.append(Feature("Reading disk images", OK if ok("amitools") else MISSING,
+                       "Disks and their files are read" if ok("amitools")
+                       else "Disk images are listed, but nothing inside them can be read", ["amitools"]))
+
+    if not ok("lhafile"):
+        out.append(Feature("LHA archives", MISSING, "LHA archives (most WHDLoad games and PD archives) "
+                           "are listed but not opened", ["lhafile", "lha (lhasa)"]))
+    elif ok("lha (lhasa)"):
+        out.append(Feature("LHA archives", OK, "All LHA archives open, old 1990–91 ones too",
+                           ["lhafile", "lha (lhasa)"]))
+    else:
+        out.append(Feature("LHA archives", PARTIAL if n("lha_unread") else OK,
+                           (f"{n('lha_unread'):,} old LHA archive{'s' if n('lha_unread') != 1 else ''} in your "
+                            "collection can't be opened until lha is installed") if n("lha_unread") else
+                           "Open, apart from old 1990–91 ones (none in your collection so far)",
+                           ["lhafile", "lha (lhasa)"], important=bool(n("lha_unread"))))
+
+    if ok("xdms"):
+        out.append(Feature("DMS disk images", OK, "DMS images are unpacked, read and copied", ["xdms"]))
+    else:
+        out.append(Feature("DMS disk images", MISSING if n("dms") else OK,
+                           (f"{n('dms'):,} DMS image{'s' if n('dms') != 1 else ''} in your collection can't be "
+                            "read, played or copied to a Gotek") if n("dms") else
+                           "Not needed so far: there are no DMS images in your collection", ["xdms"],
+                           important=bool(n("dms"))))
+
+    if ok("Qt Multimedia") and ok("libopenmpt"):
+        out.append(Feature("Playing music", OK if ok("libxmp") else PARTIAL,
+                           "Music modules play" + ("" if ok("libxmp") else
+                                                   ", apart from OctaMED synth songs (they need libxmp)"),
+                           ["Qt Multimedia", "libopenmpt", "libxmp"], important=bool(n("modules"))))
+    else:
+        out.append(Feature("Playing music", MISSING,
+                           (f"The {n('modules'):,} music modules in your collection can't be played"
+                            if n("modules") else "Music modules can't be played"),
+                           ["Qt Multimedia", "libopenmpt", "libxmp"], important=bool(n("modules"))))
+
+    emu = ok("Amiga emulator")
+    if not emu:
+        out.append(Feature("Playing disks in an emulator", MISSING,
+                           "Play in emulator doesn't work until an Amiga emulator is installed",
+                           ["Amiga emulator", "Kickstart ROMs"]))
+    else:
+        gaps = []
+        if "A500" not in roms:
+            gaps.append("Most disks start with AROS, the free replacement, which many games don't "
+                        "work with. An A500 Kickstart 1.3 fixes that.")
+        if "A1200" not in roms and n("A1200"):
+            gaps.append(f"{n('A1200'):,} AGA disk{'s' if n('A1200') != 1 else ''} in your collection "
+                        "need an A1200 Kickstart 3.x.")
+        if "A600" not in roms and n("A600"):
+            gaps.append(f"{n('A600'):,} ECS disk{'s' if n('A600') != 1 else ''} need a Kickstart 2.x.")
+        short = ("Works, but there are no Kickstart ROMs, so many games won't start" if not roms else
+                 "Works, but some disks need a Kickstart you haven't got")
+        out.append(Feature("Playing disks in an emulator", PARTIAL if gaps else OK,
+                           short if gaps else "Disks start in the emulator with the right Kickstart",
+                           ["Amiga emulator", "Kickstart ROMs"], detail="\n".join(gaps)))
+
+    tv = ok("TurboView")
+    out.append(Feature("TurboView", OK if emu and tv else MISSING,
+                       "Starts an emulated Amiga with your collection" if emu and tv else
+                       "Needs " + " and ".join(x for x, have in (("an Amiga emulator", emu),
+                                                                 ("the TurboView program", tv)) if not have),
+                       ["Amiga emulator", "TurboView"], important=False))
+
+    out.append(Feature("Copying to a Gotek stick", OK if ok("xdms") or not n("dms") else PARTIAL,
+                       "Works" if ok("xdms") or not n("dms") else
+                       "Works, apart from DMS images (they need xdms)", ["xdms"]))
+
+    home = os.path.expanduser("~")
+    writable = os.access(home, os.W_OK)
+    out.append(Feature("Repairing damaged disks", OK if ok("amitools") and writable else MISSING,
+                       "Repaired copies are made in ~/TurboCAT/Repaired" if ok("amitools") and writable
+                       else "Needs amitools, and a home folder TurboCAT can write to", ["amitools"]))
+
+    out.append(Feature("Proper names for disks", OK if ok("List of Amiga disks") else PARTIAL,
+                       "Disks are identified by their checksums" if ok("List of Amiga disks") else
+                       "Disks are known by their file names only, until the list of Amiga disks is "
+                       "downloaded (Tools › Identify disks online…)", ["List of Amiga disks"], important=False))
+    return out
+
+
+def overall(feats):
+    """'ok', 'partial' or 'missing': for the toolbar's status dot."""
+    worst = [f.status for f in feats if f.important and f.status != OK]
+    return MISSING if MISSING in worst else PARTIAL if worst else OK
 
 
 def summary(checks):

@@ -22,7 +22,12 @@ PLAY_DIR = os.path.join(CACHE, "play")
 AMIBERRY_FLATPAK = "com.blitterstudio.amiberry"
 ROM_DIRS = ["~/Amiberry/ROMs", "~/Amiberry/Kickstarts", "~/Amiberry/roms",
             "~/Documents/FS-UAE/Kickstarts", "~/.var/app/com.blitterstudio.amiberry/data/amiberry/roms",
-            "~/FS-UAE/Kickstarts"]
+            "~/FS-UAE/Kickstarts",
+            # Windows: Amiga Forever keeps its ROMs (with rom.key) in the shared Amiga Files folder
+            "%PUBLIC%/Documents/Amiga Files/Shared/rom", "~/Documents/Amiga Files/Shared/rom",
+            # macOS: Amiberry's and Amiga Forever's usual places
+            "~/Library/Application Support/Amiberry/roms", "~/Library/Application Support/Amiberry/Kickstarts",
+            "~/Documents/Amiberry/Kickstarts"]
 EXTRA_ROM_DIRS = []      # folders where scanning found Kickstart ROMs (filled in by the window)
 MODELS = ("A500", "A600", "A1200")
 # Kickstarts each model can use, best first: (major version, minor version or None)
@@ -199,14 +204,42 @@ def catalogued_rom_dirs(cat):
         return []
 
 
-def find_kickstarts(extra_dirs=()):
-    """{model: path} for the Kickstart ROMs found."""
+def _all_roms(extra_dirs=()):
+    """[(path, major, minor, crc)] for every Kickstart ROM in the usual folders."""
     roms = []
     for d in dict.fromkeys(list(extra_dirs) + EXTRA_ROM_DIRS + ROM_DIRS):
-        for p in sorted(glob.glob(os.path.join(glob.escape(os.path.expanduser(d)), "*"))):
+        d = os.path.expandvars(os.path.expanduser(d))
+        if "%PUBLIC%" in d:
+            continue                    # Windows' public folder, on a computer that hasn't one
+        for p in sorted(glob.glob(os.path.join(glob.escape(d), "*"))):
             info = _rom_info(p)
             if info:
                 roms.append((p, *info))
+    return roms
+
+
+def kickstart_list(extra_dirs=()):
+    """Every Kickstart ROM found, for Check setup: [(path, name, models it starts)]."""
+    out, seen = [], set()
+    for p, ma, mi, crc in _all_roms(extra_dirs):
+        if crc in seen:
+            continue
+        seen.add(crc)
+        try:
+            with open(p, "rb") as f:
+                aros = b"AROS" in f.read(1 << 20)
+        except OSError:
+            aros = False
+        if aros:      # the free replacement: starts many disks, but isn't a real Kickstart
+            out.append((p, "AROS (free replacement, not a real Kickstart)", []))
+        else:
+            out.append((p, kickstart_name(ma, mi, crc), models_for(ma, mi, crc)))
+    return out
+
+
+def find_kickstarts(extra_dirs=()):
+    """{model: path} for the Kickstart ROMs found."""
+    roms = _all_roms(extra_dirs)
     found = {}
     for model, wants in WANTED.items():
         for major, minor in wants:

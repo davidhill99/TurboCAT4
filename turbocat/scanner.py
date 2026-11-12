@@ -4,7 +4,7 @@ import hashlib
 import os
 import time
 
-from . import emulator, music, readers, whdload
+from . import emulator, folders, music, readers, whdload
 from .catalogue import BLANK_SHA1
 from .readers import detect, ContainerResult
 
@@ -219,9 +219,14 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
     found = [os.path.abspath(os.path.expanduser(p)) for p in paths]
     if add_roots:
         catalogue.add_scan_roots([p for p in found if os.path.exists(p)])
+    sel = catalogue.selection()              # folders the user told TurboCAT to leave out
+    skips = {folders.norm(s) for s in sel.skips}
     todo = []
     for p in paths:
         p = os.path.abspath(os.path.expanduser(p))
+        if skips and not sel.included(p):
+            summary.setdefault("left_out", []).append(p)
+            continue
         if not os.path.exists(p):
             summary.setdefault("missing", []).append(p)
             if progress:
@@ -236,7 +241,9 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
                 keep = []
                 for d in dirs:
                     full = os.path.join(root, d)
-                    if readers.looks_like_amiga_folder(full):
+                    if full in skips:
+                        summary.setdefault("left_out", []).append(full)
+                    elif readers.looks_like_amiga_folder(full):
                         todo.append(("folder", full))
                     else:
                         keep.append(d)
