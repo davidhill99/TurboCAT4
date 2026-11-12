@@ -12,6 +12,17 @@ _DISK = re.compile(r"\(\s*Dis[ck]\s*(\d+)\s*of\s*(\d+)\s*\)", re.I)
 _TAGS = re.compile(r"\[[^\]]*\]")
 _SYSTEM_DIRS = ("libs/", "devs/", "fonts/", "l/", "c/", "s/")
 _SYSTEM_EXT = (".library", ".device", ".font", ".datatype", ".resource")
+# Standard AmigaDOS / Workbench commands (C: on Workbench 1.3-3.x). Games and demos often copy
+# these into their own root or a drawer rather than C/, so they are matched by name anywhere.
+_SYSTEM_COMMANDS = frozenset(n.lower() for n in """
+    AddBuffers AddDataTypes Alias Ask Assign Avail BindDrivers Break CD ChangeTaskPri ConClip
+    Copy CPU Date Delete Dir DiskChange DiskDoctor Echo Ed Edit Else EndCLI EndIf EndShell EndSkip
+    Eval Execute FailAt Fault FF FileNote Format Get GetEnv IconX If Info Install Join Lab List
+    LoadResource LoadWB Lock MakeDir MakeLink More Mount NewCLI NewShell Path Prompt Protect Quit
+    Relabel RemRAD Rename RequestChoice RequestFile Resident Run Search Set SetClock SetDate
+    SetEnv SetFont SetKeyboard SetPatch Skip Sort Stack Status Type UnAlias UnSet UnSetEnv
+    Version Wait Which Why
+""".split())
 
 
 def parse(name: str):
@@ -27,7 +38,8 @@ def parse(name: str):
 
 def is_system_file(path: str) -> bool:
     p = path.lower()
-    return p.endswith(_SYSTEM_EXT) or any(p.startswith(d) or f"/{d}" in p for d in _SYSTEM_DIRS)
+    return (p.endswith(_SYSTEM_EXT) or p.rsplit("/", 1)[-1] in _SYSTEM_COMMANDS
+            or any(p.startswith(d) or f"/{d}" in p for d in _SYSTEM_DIRS))
 
 
 def analyse(sources):

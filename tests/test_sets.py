@@ -63,5 +63,19 @@ class SetsTest(unittest.TestCase):
         self.assertEqual(sets.group([disk(1, 1)], dups.keeper_order), [])
 
 
+class SystemFileTest(unittest.TestCase):
+    def test_workbench_commands_count_outside_c(self):
+        for p in ("Assign", "Game/SetPatch", "Tools/IconX", "c/Assign", "Execute"):
+            self.assertTrue(sets.is_system_file(p), p)
+
+    def test_folders_and_extensions_still_count(self):
+        for p in ("libs/diskfont.library", "Game/devs/narrator.device", "s/Startup-Sequence"):
+            self.assertTrue(sets.is_system_file(p), p)
+
+    def test_ordinary_game_files_do_not(self):
+        for p in ("Game/Assign.doc", "Assigned", "Game/main.exe", "data/level1", "Copy.info"):
+            self.assertFalse(sets.is_system_file(p), p)
+
+
 if __name__ == "__main__":
     unittest.main()
