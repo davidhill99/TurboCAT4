@@ -66,5 +66,51 @@ class VersionsTest(unittest.TestCase):
         self.assertEqual(spare.versions, 1)
 
 
+class GoodCopyTest(unittest.TestCase):
+    """R2: a damaged disk with a version that reads fully is pointed to it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cat = Catalogue(os.path.join(self.tmp.name, "t.db"))
+
+    def tearDown(self):
+        self.cat.db.close()
+        self.tmp.cleanup()
+
+    def test_damaged_disk_points_to_the_good_version(self):
+        bad, good, warn = item(1, "[b].zip", "error"), item(2, ".zip"), item(3, "[h ALE].zip", "warning")
+        versions.mark([bad, good, warn], self.cat)
+        self.assertEqual(bad.good_copy, 2)               # the best healthy one: no tags, no warning
+        self.assertFalse(hasattr(good, "good_copy"))
+
+    def test_no_good_copy_when_every_version_is_damaged(self):
+        a, b = item(1, "[b].zip", "error"), item(2, ".zip", "error")
+        versions.mark([a, b], self.cat)
+        self.assertFalse(hasattr(a, "good_copy") or hasattr(b, "good_copy"))
+
+    def test_a_bad_dump_that_reads_is_not_a_good_copy(self):
+        bad, also_bad = item(1, ".zip", "error"), item(2, "[b virus damage].zip")
+        versions.mark([bad, also_bad], self.cat)
+        self.assertFalse(hasattr(bad, "good_copy"))
+
+    def test_a_version_with_no_files_is_not_a_good_copy(self):
+        bad, wrecked = item(1, ".zip", "error"), item(2, "[a].zip")
+        bad.files, wrecked.files = "220", "—"           # TurboCAT could list nothing on it
+        versions.mark([bad, wrecked], self.cat)
+        self.assertFalse(hasattr(bad, "good_copy"))
+
+    def test_spare_copies_of_the_damaged_disk_get_it_too(self):
+        bad, good = item(1, "[b].zip", "error"), item(2, ".zip")
+        spare = item(3, "[b] copy.zip", "error", spare_of=1)
+        versions.mark([bad, good, spare], self.cat)
+        self.assertEqual(spare.good_copy, 2)
+
+    def test_a_different_disk_is_not_a_good_copy(self):
+        bad = item(1, "[b].zip", "error")
+        other = SimpleNamespace(**{**vars(item(2, ".zip")), "path": "/c/Other Disk (PD).zip"})
+        versions.mark([bad, other], self.cat)
+        self.assertFalse(hasattr(bad, "good_copy"))
+
+
 if __name__ == "__main__":
     unittest.main()

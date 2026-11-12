@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QTableView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
 from . import APP_NAME, VERSION
-from . import readers
+from . import explain, readers
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
 from . import coverdisks, datlists, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
@@ -88,7 +88,7 @@ FILTERS = [
     ("utils", "Utilities", "tool", lambda it: bool(it.utility)),
     ("covers", "Coverdisks", "magazine", lambda it: it.cover is not None),
     ("roms", "Kickstart ROMs", "chip", lambda it: it.type == "Kickstart"),
-    ("problems", "Problems", "problem", lambda it: it.status == "error"),
+    ("problems", "Problems", "problem", lambda it: it.status == "error" and not it.good_copy),
     ("warnings", "Warnings", "warning", lambda it: it.status == "warning"),
     ("fixable", "Can be fixed", "tool", lambda it: bool(it.fixable)),
     ("dups", "Duplicates", "duplicate", lambda it: it.copies > 1),
@@ -219,6 +219,8 @@ class Item:
     music: int = 0              # music modules found inside
     cover: object = None        # a coverdisks.Coverdisk: the magazine, issue and disk it came with
     fixable: tuple = ()         # readers.local_fixes: helper programs that would let it be read
+    good_copy: int = 0          # damaged, but this version (id) of the same disk reads fully
+    damage: str = ""            # a Problem in plain words: "1 of 220 files damaged — ..."
     search_blob: str = field(default="", repr=False)
 
 
@@ -335,7 +337,10 @@ def load_items(cat):
             name_guess="" if m["id"] in known else identify.guess(m["source"]),
             key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0), cover=cover,
             fixable=tuple(readers.local_fixes(
-                [x for r in [m] + kids for f in ("problems", "warnings") for x in _j(r[f], [])]))))
+                [x for r in [m] + kids for f in ("problems", "warnings") for x in _j(r[f], [])])),
+            damage=explain.summary([x for r in [m] + kids for x in _j(r["problems"], [])],
+                                   int(files.replace(",", "")) if files.replace(",", "").isdigit() else 0)
+            if status == "error" else ""))
     dupes.mark(items, cat)
     vers.mark(items, cat)
     return items
@@ -440,6 +445,9 @@ class ItemModel(QAbstractTableModel):
                 return it.files
             if it.members:
                 return it.set_badge
+            if role == Qt.ItemDataRole.ToolTipRole and it.status == "error" and it.damage:
+                return it.damage + ("\nYou have a good copy: another version reads fully."
+                                    if it.good_copy else "")
             v = _version_word(it)
             return STATUS.get(it.status, STATUS["ok"])[0] + _dup_word(it, long=True) + (f" · {v}" if v else "")
         return None
@@ -852,9 +860,11 @@ class Note(QFrame):
     """A tinted note: icon, a heading and up to three detail lines."""
     MAX_LINES = 3
 
-    def __init__(self, tone, ico, heading, lines=(), on_link=None):
+    def __init__(self, tone, ico, heading, lines=(), on_link=None, tip=""):
         super().__init__()
         self.setObjectName("note_" + tone)
+        if tip:
+            self.setToolTip(tip)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)
@@ -1442,6 +1452,36 @@ class DetailsPanel(QFrame):
         else:
             self.on_select_number(int(href))
 
+    def _not_fixable_note(self, item, m, kids, bad):
+        """Whether the collection can fix a damaged disk with no good copy: the short answer, and
+        the reason on hover."""
+        win = self.window()
+        everything = getattr(win, "all_items", [])
+        reasons = explain.why_not_fixable(item, everything)
+        found = explain.found_elsewhere(self.cat, bad, [m["id"]] + [k["id"] for k in kids])
+        if bad and found:
+            missing = [p for p in bad if p not in found]
+            head = ("<b>Could be rebuilt</b> — every damaged file is on your other disks"
+                    if not missing else
+                    f"<b>Partly rebuildable</b> — {len(found)} of {len(bad)} damaged files "
+                    f"{'is' if len(found) == 1 else 'are'} on your other disks")
+            lines = [f"{os.path.basename(p)}: on #{', #'.join(f'{n:04d}' for n in nums[:3])}"
+                     for p, nums in found.items()]
+            self.notes.addWidget(Note("neutral", "tool", head, [_esc(x) for x in lines],
+                                      tip="\n".join(reasons + ([
+                                          "Not on your other disks: " + ", ".join(
+                                              os.path.basename(p) for p in missing) + "."]
+                                          if missing else []) + [
+                                          "TurboCAT will be able to build a repaired copy from them "
+                                          "in a later version."])))
+            return
+        tip = reasons + ([("The damaged file isn't" if len(bad) == 1 else "None of the damaged files are")
+                          + " on any of your other disks either."] if bad else [])
+        tip.append("To fix it, get a clean copy of the disk (for free disks, from a PD archive such as "
+                   "Aminet).")
+        self.notes.addWidget(Note("neutral", None, "<b>Can't be fixed from your collection</b> "
+                                  "— hover for why", tip="\n".join(tip)))
+
     def show_item(self, item):
         m = self.cat.media_by_id(item.id)
         if m is None:
@@ -1662,7 +1702,12 @@ class DetailsPanel(QFrame):
                 "against the TOSEC list of Amiga disks."))
         if item.utility:
             self.notes.addWidget(Note("neutral", "tool", f"<b>Utility</b> — {_esc(item.utility)}"))
-        if item.verified and item.verified[0] == "match":
+        if item.verified and item.verified[0] == "match" and item.status == "error":
+            self.notes.addWidget(Note(
+                "neutral", None, "<b>Same as the collection's copy</b> — hover for what that means",
+                tip=f"This file is exactly the one listed in {item.verified[1]}.\nSo the damage "
+                    "was already in the copy that collection holds: it didn't happen to yours."))
+        elif item.verified and item.verified[0] == "match":
             self.notes.addWidget(Note(
                 "accent", "ok", f"<b>Verified</b> — exactly the file listed in {_esc(item.verified[1])}: "
                 "complete and undamaged."))
@@ -1685,7 +1730,25 @@ class DetailsPanel(QFrame):
         if m["status"] != "empty":
             problems = collect("problems")
             if problems:
-                self.notes.addWidget(Note("problem", "problem", "<b>Problem</b>", problems))
+                total = int(item.files.replace(",", "")) if item.files.replace(",", "").isdigit() else 0
+                bad = explain.damaged_paths(problems)
+                self.notes.addWidget(Note(
+                    "problem", "problem", f"<b>{_esc(explain.summary(problems, total))}</b>",
+                    [_esc(p) for p in bad],
+                    tip="What TurboCAT found:\n" + "\n".join(x[:200] for x in problems[:25])
+                        + (f"\n… and {len(problems) - 25} more" if len(problems) > 25 else "")))
+                if not item.good_copy and not item.fixable and m["status"] != "empty":
+                    self._not_fixable_note(item, m, kids, bad)
+        good = self.cat.media_by_id(item.good_copy) if item.good_copy else None
+        if good is not None:
+            name = os.path.basename(good["source"].rstrip("/"))
+            what = [vers.describe(t) for t in vers.tags(name)]
+            self.notes.addWidget(Note(
+                "accent", "ok",
+                f"<b>You have a good copy</b> — <a href='{good['number']}'>#{good['number']:04d}</a> "
+                "is another version of this disk, and it reads fully. Nothing is lost.",
+                [_esc(name)] + ([f"That version: {_esc(', '.join(what))}"] if what else []),
+                on_link=lambda h: self.on_select_number(int(h))))
         warnings = collect("warnings")
         fs_issues = [w for w in warnings if FS_ISSUE in w]
         warnings = [w for w in warnings if FS_ISSUE not in w]
@@ -4570,6 +4633,13 @@ class MainWindow(QMainWindow):
             self.result_label.setText(
                 f"{_n(len(shown), 'disk set')} with missing or damaged disks · "
                 "File › Export sets to complete… saves what each one needs")
+        elif self.filter == "problems" and not text:
+            spared = sum(1 for it in everything if it.status == "error" and it.good_copy
+                         and not it.spare_of and (not grouped or not it.version_of))
+            self.result_label.setText(
+                f"Problems {len(shown):,} of {len(self.all_items):,} items" + (
+                    f" · {_n(spared, 'damaged disk')} not counted: you have a good copy"
+                    if spared else ""))
         elif self.filter == "fixable":
             now = [it for it in shown if any(here for _, _, here in it.fixable)]
             need = sorted({pkg for it in shown for _, pkg, here in it.fixable if not here})

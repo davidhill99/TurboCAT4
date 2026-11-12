@@ -19,6 +19,19 @@ What changed in each release, newest first. Work not yet in a numbered release i
 - New **Can be fixed** filter chip lists those items (it only appears when there are some), and
   says what to install for the rest; **Fix them now** reads again every one that can be fixed
   with what is installed already
+- **You have a good copy** (repair R2): a damaged disk with another version that reads fully says
+  so in Details, with a link to that version and what its TOSEC tags mean, and is no longer counted
+  under Problems. A version TOSEC tags as a bad dump `[b]` never counts as a good copy, even if it
+  reads. The Problems line says how many damaged disks were left out for this reason
+- Problems in plain English: Details says e.g. **1 of 220 files damaged — the other 219 read
+  fine** and names the files; TurboCAT's technical findings are on hover. The list's Problem badge
+  says the same on hover
+- A damaged disk with no good copy says whether your collection can help: **Could be rebuilt** /
+  **Partly rebuildable** (its damaged files are on your other disks, and which), or **Can't be
+  fixed from your collection**, with the reason on hover (e.g. the other version is a bad dump too)
+- A damaged disk that matches a collection list exactly no longer says "Verified … undamaged":
+  it says the damage was already in the collection's copy. A version with no readable files is
+  never taken as a good copy
 - When a helper program (lha, 7-Zip, xdms) is installed after a scan, the next scan or Rescan reads
   again, once, the items that couldn't be read without it, even though their files haven't changed.
   Before, they stayed "unreadable" until rechecked by hand

@@ -97,4 +97,34 @@ def mark(items, cat):
             it.versions = len(group)
             it.version_of = 0 if it is shown else shown.id
             it.other_versions = tuple(o.id for o in group if o is not shown) if it is shown else ()
+    mark_good_copies(items, groups)
     return groups
+
+
+def mark_good_copies(items, groups):
+    """A damaged disk (Problem) with a version that reads fully gets .good_copy: that version's id
+    (the best one, preferring the version shown). A version TOSEC tags as a bad dump [b] doesn't
+    count, even if it reads: its contents are known to be damaged. Spare copies of the damaged
+    disk get it too: they are the same bytes."""
+    by_id = {}
+    for group in groups.values():
+        healthy = [it for it in group if it.status in ("ok", "warning")
+                   and not any(t.startswith("b") for t in tags(name_of(it)))]
+        healthy.sort(key=lambda it: (bool(it.version_of),) + order(it))
+        for it in group:
+            if it.status != "error":
+                continue
+            # a version with no files to read can't stand in for a disk that has files
+            usable = [h for h in healthy if _has_files(h) or not _has_files(it)]
+            if usable:
+                it.good_copy = usable[0].id
+                by_id[it.id] = it.good_copy
+    for it in items:
+        if it.spare_of in by_id:
+            it.good_copy = by_id[it.spare_of]
+
+
+def _has_files(item):
+    """False for a disk TurboCAT found no files on ("—" or 0)."""
+    n = str(getattr(item, "files", "1")).replace(",", "")
+    return n.isdigit() and int(n) > 0
