@@ -23,7 +23,7 @@ from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QFontMetric
                            QAction, QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
-                               QFrame, QGridLayout, QLayout, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+                               QFrame, QGridLayout, QLayout, QProgressDialog, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QRadioButton,
                                QButtonGroup, QHBoxLayout, QProgressBar,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QPushButton,
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QTableView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
 from . import APP_NAME, VERSION
-from . import explain, readers
+from . import explain, readers, repair
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
 from . import coverdisks, datlists, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
@@ -90,13 +90,14 @@ FILTERS = [
     ("roms", "Kickstart ROMs", "chip", lambda it: it.type == "Kickstart"),
     ("problems", "Problems", "problem", lambda it: it.status == "error" and not it.good_copy),
     ("warnings", "Warnings", "warning", lambda it: it.status == "warning"),
-    ("fixable", "Can be fixed", "tool", lambda it: bool(it.fixable)),
+    ("fixable", "Can be fixed", "tool", lambda it: can_fix(it)),
+    ("repaired", "Repaired copies", "tool", lambda it: it.repaired),
     ("dups", "Duplicates", "duplicate", lambda it: it.copies > 1),
     ("sets", "Sets to complete", "disk", lambda it: it.set_problem),
     ("whd", "WHDLoad games", "game", lambda it: it.type == "WHDLoad"),
     ("nondos", "Non-DOS disks", "disk", lambda it: it.non_dos),
     ("hd", "Hard drives", "harddrive", lambda it: it.hard_drive),
-    ("empty", "Empty", None, lambda it: it.status == "empty"),
+    ("empty", "Empty", None, lambda it: it.status == "empty" and not it.good_copy),
 ]
 FILTER_TEST = {k: t for k, _, _, t in FILTERS}
 
@@ -221,6 +222,9 @@ class Item:
     fixable: tuple = ()         # readers.local_fixes: helper programs that would let it be read
     good_copy: int = 0          # damaged, but this version (id) of the same disk reads fully
     damage: str = ""            # a Problem in plain words: "1 of 220 files damaged — ..."
+    repaired: bool = False      # a repaired copy TurboCAT made (not an original dump)
+    rebuild: tuple = ()         # (damaged files that can be put back, damaged files): repair.plan
+    repaired_copy: int = 0      # the id of a repaired copy TurboCAT made of this damaged disk
     search_blob: str = field(default="", repr=False)
 
 
@@ -252,6 +256,8 @@ def load_items(cat):
             util_why[mid] = f"in TOSEC's {which} list"
     starred = favs.load(cat)
     mag_covers = magcovers.covers(cat)
+    made = repair.repaired_sha1s()
+    plans = repair.plan_all(cat)
     rank = {"error": 3, "warning": 2}
     items = []
     for m in rows:
@@ -340,10 +346,83 @@ def load_items(cat):
                 [x for r in [m] + kids for f in ("problems", "warnings") for x in _j(r[f], [])])),
             damage=explain.summary([x for r in [m] + kids for x in _j(r["problems"], [])],
                                    int(files.replace(",", "")) if files.replace(",", "").isdigit() else 0)
-            if status == "error" else ""))
+            if status == "error" else "",
+            repaired=bool(own_key) and own_key in made,
+            rebuild=(len(plans[m["id"]].usable()), len(plans[m["id"]].lost)) if m["id"] in plans else ()))
     dupes.mark(items, cat)
     vers.mark(items, cat)
+    _link_repairs(items)
+    _link_empty_covers(items)
     return items
+
+
+def _link_empty_covers(items):
+    """An empty coverdisk file (0 bytes) whose magazine, issue and disk are in the collection as a
+    working image: point it there, so Empty lists only what is really missing."""
+    def key(it):
+        c = it.cover
+        return (c.magazine, c.issue, c.disk) if c is not None and c.magazine and c.issue else None
+    good = {}
+    for it in sorted((x for x in items if x.status in ("ok", "warning") and key(x)), key=vers.order):
+        if not any(t.startswith("b") for t in vers.tags(vers.name_of(it))):
+            good.setdefault(key(it), it.id)
+    for it in items:
+        if it.status == "empty" and not it.good_copy and key(it) in good:
+            it.good_copy = good[key(it)]
+
+
+def _link_repairs(items):
+    """Point each damaged disk at the repaired copy TurboCAT made of it (from the repair log, so
+    it works whatever the names say). A complete repair counts as a good copy."""
+    copies = repair.copies_of()
+    if not copies:
+        return
+    by_sha = {it.sha1: it for it in items if it.repaired}
+    for it in items:
+        if it.status != "error" or it.repaired:
+            continue
+        made = [by_sha[sha] for sha in copies.get(it.file, []) if sha in by_sha]
+        if not made:
+            continue
+        whole = [c for c in made if "[b]" not in c.file]
+        it.repaired_copy = (whole or made)[-1].id
+        if whole and not it.good_copy:
+            it.good_copy = whole[-1].id
+
+
+def _set_rebuild(members):
+    """A set's rebuild counts: over its damaged disks that have no good copy."""
+    todo = [m.rebuild for m in members if m.rebuild and can_fix(m)]
+    return (sum(a for a, _ in todo), sum(b for _, b in todo)) if todo else ()
+
+
+def fix_word(it):
+    """The second pill on a damaged row: how it can be fixed, if it can. ('', '') if not."""
+    if it.repaired:
+        return "Repaired copy", "tool"
+    if it.status != "error" and not it.members:
+        return "", ""
+    if it.good_copy:
+        return "", ""
+    if it.repaired_copy:
+        full = it.rebuild and it.rebuild[0] == it.rebuild[1]
+        return ("Can be fully rebuilt now" if full else "Partly repaired"), "tool"
+    if it.rebuild and it.rebuild[0]:
+        return ("Can be rebuilt" if it.rebuild[0] == it.rebuild[1] else "Partly rebuildable"), "tool"
+    if any(here for _, _, here in it.fixable):
+        return "Can be fixed now", "tool"
+    if it.fixable:
+        return "Fix: install " + ", ".join(pkg for _, pkg, _ in it.fixable), "tool"
+    return "", ""
+
+
+def can_fix(it):
+    """For the Can be fixed chip: a helper program, or files on other disks, would fix it."""
+    if it.repaired or it.good_copy:
+        return False
+    if it.repaired_copy:            # partly repaired: again only once every file can be put back
+        return bool(it.rebuild and it.rebuild[0] == it.rebuild[1])
+    return bool(it.fixable) or bool(it.rebuild and it.rebuild[0])
 
 
 def _verified(m, kids, lists):
@@ -387,7 +466,8 @@ def make_set_items(items):
             key=first.key, music=sum(m.music for m in members),
             members=tuple(m.id for m in members), set_badge=badge, set_tone=tone,
             set_problem=not ds.complete, dset=ds, cover=cover,
-            fixable=tuple(sorted({f for m in members for f in m.fixable})))
+            fixable=tuple(sorted({f for m in members for f in m.fixable})),
+            rebuild=_set_rebuild(members))
         rows.append(row)
         for n, m, _ in ds.disks:
             member_of[m.id] = row
@@ -446,10 +526,16 @@ class ItemModel(QAbstractTableModel):
             if it.members:
                 return it.set_badge
             if role == Qt.ItemDataRole.ToolTipRole and it.status == "error" and it.damage:
+                fix = fix_word(it)[0]
                 return it.damage + ("\nYou have a good copy: another version reads fully."
-                                    if it.good_copy else "")
+                                    if it.good_copy else
+                                    f"\n{fix}: {it.rebuild[0]} of {it.rebuild[1]} damaged files are on "
+                                    "your other disks." if fix in ("Can be rebuilt", "Partly rebuildable")
+                                    else f"\n{fix}." if fix else "")
             v = _version_word(it)
-            return STATUS.get(it.status, STATUS["ok"])[0] + _dup_word(it, long=True) + (f" · {v}" if v else "")
+            fix = fix_word(it)[0]
+            return (STATUS.get(it.status, STATUS["ok"])[0] + (f" · {fix}" if fix else "")
+                    + _dup_word(it, long=True) + (f" · {v}" if v else ""))
         return None
 
 
@@ -673,10 +759,16 @@ class RowDelegate(QStyledItemDelegate):
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, it.files)
         elif it.members:
             fg, bg, ico = SET_TONE[it.set_tone]
-            self._pill(p, x, r, it.set_badge, C[fg], C[bg], ico)
+            px = self._pill(p, x, r, it.set_badge, C[fg], C[bg], ico)
+            fix, fico = fix_word(it)
+            if fix:
+                self._pill(p, px + 6, r, fix, C["accent"], C["accent-tint"], fico)
         else:
             word, fg, bg, ico = STATUS.get(it.status, STATUS["ok"])
             px = self._pill(p, x, r, word, C[fg], C[bg], ico)
+            fix, fico = fix_word(it)
+            if fix:
+                px = self._pill(p, px + 6, r, fix, C["accent"], C["accent-tint"], fico)
             if it.copies > 1:
                 px = self._pill(p, px + 6, r, _dup_word(it), C["ink-soft"], C["neutral-tint"], "duplicate")
             if it.versions > 1:
@@ -860,7 +952,7 @@ class Note(QFrame):
     """A tinted note: icon, a heading and up to three detail lines."""
     MAX_LINES = 3
 
-    def __init__(self, tone, ico, heading, lines=(), on_link=None, tip=""):
+    def __init__(self, tone, ico, heading, lines=(), on_link=None, tip="", button=None):
         super().__init__()
         self.setObjectName("note_" + tone)
         if tip:
@@ -889,7 +981,133 @@ class Note(QFrame):
             more = _wrap_label(f"… and {len(lines) - self.MAX_LINES} more", ui_font(12, italic=True))
             more.setToolTip("\n".join(lines[self.MAX_LINES:self.MAX_LINES + 40]))
             body.addWidget(more)
+        if button:
+            b = QPushButton(button[0])
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(button[1])
+            row = QHBoxLayout()
+            row.addWidget(b)
+            row.addStretch(1)
+            body.addSpacing(4)
+            body.addLayout(row)
         lay.addLayout(body, 1)
+
+
+class RepairDialog(QDialog):
+    """Make repaired copy: what TurboCAT will do, in plain words, and a go-ahead."""
+    MARK = {"strong": "✓", "likely": "✓", "unsure": "?", "none": "✗"}
+
+    def __init__(self, parent, plan):
+        super().__init__(parent)
+        self.plan = plan
+        self.setWindowTitle("Make repaired copy")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(12)
+        lost = plan.lost
+        found = [x for x in lost if x.confidence in ("strong", "likely")]
+        unsure = [x for x in lost if x.confidence == "unsure"]
+        none = [x for x in lost if x.confidence == "none"]
+        head = QLabel(f"Repair #{plan.number:04d}?")
+        head.setFont(ui_font(16, QFont.Weight.DemiBold))
+        v.addWidget(head)
+        n = len(lost)
+        if len(found) == n:
+            what = f"good copies of {'all ' + str(n) if n > 1 else 'it'} are on your other disks."
+        else:
+            what = f"good copies of {len(found)} {'is' if len(found) == 1 else 'are'} on your other disks."
+        intro = _wrap_label(
+            f"{_esc(plan.source_file)}<br>has {n} damaged file{'s' if n != 1 else ''}; {what}",
+            ui_font(13))
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setFixedWidth(580)
+        v.addWidget(intro)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(4)
+        for r, x in enumerate(lost):
+            mark = QLabel(self.MARK[x.confidence])
+            name = QLabel(x.path)
+            name.setFont(ui_font(13, QFont.Weight.DemiBold))
+            if x.use is None:
+                where = "not on your other disks: it will be left out"
+            else:
+                disks = len({s.number for s in x.sources})
+                where = f"from #{x.use.number:04d} {x.use.name}"
+                if x.confidence == "strong":
+                    tip = (f"Found on {disks} disks, all identical." if disks > 1 else
+                           "Found on one disk, with the same file date as the damaged one.")
+                elif x.confidence == "likely":
+                    tip = ("Found on one disk only. Same name and size, so very probably the same file."
+                           if x.versions == 1 else
+                           "Several versions exist; this is the only one with the damaged file's date.")
+                else:
+                    tip = (f"{x.versions} different files have this name and size. TurboCAT would use "
+                           "the one found most often, but can't be sure it is the right one.")
+                where += "  ·  " + {"strong": "sure", "likely": "very likely", "unsure": "not sure"}[
+                    x.confidence]
+                for w in (mark, name):
+                    w.setToolTip(tip)
+            lab = QLabel(where)
+            lab.setObjectName("muted")
+            if x.use is not None:
+                lab.setToolTip(tip)
+            grid.addWidget(mark, r, 0)
+            grid.addWidget(name, r, 1)
+            grid.addWidget(lab, r, 2)
+        grid.setColumnStretch(2, 1)
+        v.addLayout(grid)
+
+        self.unsure_box = None
+        if unsure:
+            self.unsure_box = QCheckBox(f"Also use the file{'s' if len(unsure) > 1 else ''} marked "
+                                        "“not sure”")
+            self.unsure_box.setToolTip("Left unticked, those files are left out and the copy is marked "
+                                       "as still damaged [b].")
+            v.addWidget(self.unsure_box)
+
+        does = _wrap_label(
+            "<b>What TurboCAT will do</b><br>"
+            "• Make a <b>new</b> disk image with these files put back. Your original stays exactly as "
+            "it is.<br>"
+            "• Mark it as repaired, not original: <i>[f TurboCAT]</i> in its name, and in the "
+            "catalogue." + ("" if not none else
+                            "<br>• Files not found are left out, so the copy is marked as still damaged "
+                            "<i>[b]</i>.") +
+            f"<br>• Save it in {_esc(repair.REPAIRED_DIR)} and add it to the catalogue.",
+            ui_font(13))
+        does.setTextFormat(Qt.TextFormat.RichText)
+        does.setFixedWidth(580)
+        v.addWidget(does)
+        self.mark_box = QCheckBox("Also mark the disk itself (recommended)")
+        self.mark_box.setChecked(True)
+        self.mark_box.setToolTip(f"Adds a {repair.MARKER} text file saying what was done, and a file note "
+                                 "on each restored file. Both show on a real Amiga.")
+        v.addWidget(self.mark_box)
+        how = QLabel("Files are matched by name and size — hover for what that means")
+        how.setObjectName("muted")
+        how.setToolTip("TurboCAT can't compare a replacement with the damaged file's contents, because "
+                       "those are what was lost. A file with the same name and size, found intact "
+                       "elsewhere, is almost always the same file, especially when several disks agree.")
+        v.addWidget(how)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        go = QPushButton("Make repaired copy")
+        go.setObjectName("primary")
+        go.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        go.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(go)
+        v.addLayout(row)
+
+    def with_unsure(self):
+        return bool(self.unsure_box and self.unsure_box.isChecked())
+
+    def mark(self):
+        return self.mark_box.isChecked()
 
 
 class ElidedLabel(QLabel):
@@ -1452,6 +1670,22 @@ class DetailsPanel(QFrame):
         else:
             self.on_select_number(int(href))
 
+    def _partly_repaired_note(self, item):
+        """A damaged disk with a repaired copy that is still missing files."""
+        copy = self.cat.media_by_id(item.repaired_copy)
+        if copy is None:
+            return
+        made = repair.log_for(copy["sha1"] or "")
+        back = [f for f, src in made if src]
+        still = [f for f, src in made if not src]
+        self.notes.addWidget(Note(
+            "neutral", "tool",
+            f"<b>Partly repaired</b> — <a href='{copy['number']}'>#{copy['number']:04d}</a> has "
+            f"{len(back)} of {len(back) + len(still)} damaged files back. Still missing:",
+            [_esc(x) for x in still],
+            on_link=lambda h: self.on_select_number(int(h)),
+            tip=repair.FINISH_IT))
+
     def _not_fixable_note(self, item, m, kids, bad):
         """Whether the collection can fix a damaged disk with no good copy: the short answer, and
         the reason on hover."""
@@ -1467,13 +1701,16 @@ class DetailsPanel(QFrame):
                     f"{'is' if len(found) == 1 else 'are'} on your other disks")
             lines = [f"{os.path.basename(p)}: on #{', #'.join(f'{n:04d}' for n in nums[:3])}"
                      for p, nums in found.items()]
-            self.notes.addWidget(Note("neutral", "tool", head, [_esc(x) for x in lines],
-                                      tip="\n".join(reasons + ([
-                                          "Not on your other disks: " + ", ".join(
-                                              os.path.basename(p) for p in missing) + "."]
-                                          if missing else []) + [
-                                          "TurboCAT will be able to build a repaired copy from them "
-                                          "in a later version."])))
+            mid = m["id"]
+            self.notes.addWidget(Note(
+                "neutral", "tool", head, [_esc(x) for x in lines],
+                tip="\n".join(reasons + ([
+                    "Not on your other disks: " + ", ".join(os.path.basename(p) for p in missing) + "."]
+                    if missing else []) + [
+                    "Make repaired copy… shows exactly what TurboCAT would do, and asks first. "
+                    "Your original is never changed."]),
+                button=("Make repaired copy…",
+                        lambda: win.make_repaired_copy(mid) if hasattr(win, "make_repaired_copy") else None)))
             return
         tip = reasons + ([("The damaged file isn't" if len(bad) == 1 else "None of the damaged files are")
                           + " on any of your other disks either."] if bad else [])
@@ -1721,6 +1958,24 @@ class DetailsPanel(QFrame):
             self.notes.addWidget(Note("accent", "game", f"<b>WHDLoad game:</b> {_esc(m['whd_name'])}",
                                       lines))
 
+        if item.repaired:
+            made = repair.log_for(item.sha1)
+            self.notes.addWidget(Note(
+                "accent", "tool", "<b>Repaired copy, not an original dump</b> — made by TurboCAT. "
+                "Hover for where its restored files came from.",
+                tip="\n".join([f"{f}  from {src}" for f, src in made if src]
+                               or ["(not in TurboCAT's repair log)"])
+                    + "\n\nThe disk also holds a Repaired-by-TurboCAT note, and each restored file "
+                      "has a file note saying where it came from."))
+            still = [f for f, src in made if not src]
+            if still:
+                self.notes.addWidget(Note(
+                    "warn", "warning",
+                    f"<b>Still missing {_n(len(still), 'file')}</b> — "
+                    f"{'it isn' if len(still) == 1 else 'they aren'}'t anywhere in your collection. "
+                    "Hover for how to fix it fully.",
+                    [_esc(x) for x in still], tip=repair.FINISH_IT))
+
         def collect(field):
             out = []
             for r in [m] + kids:
@@ -1737,17 +1992,31 @@ class DetailsPanel(QFrame):
                     [_esc(p) for p in bad],
                     tip="What TurboCAT found:\n" + "\n".join(x[:200] for x in problems[:25])
                         + (f"\n… and {len(problems) - 25} more" if len(problems) > 25 else "")))
-                if not item.good_copy and not item.fixable and m["status"] != "empty":
+                if item.repaired_copy and not item.good_copy:
+                    self._partly_repaired_note(item)
+                full = item.rebuild and item.rebuild[0] == item.rebuild[1]
+                if (not item.good_copy and not item.fixable and m["status"] != "empty"
+                        and (not item.repaired_copy or full)):
                     self._not_fixable_note(item, m, kids, bad)
         good = self.cat.media_by_id(item.good_copy) if item.good_copy else None
         if good is not None:
             name = os.path.basename(good["source"].rstrip("/"))
             what = [vers.describe(t) for t in vers.tags(name)]
+            fixed = (good["sha1"] or "") in repair.repaired_sha1s() or any(
+                (k["sha1"] or "") in repair.repaired_sha1s() for k in self._descendants(good["id"]))
             self.notes.addWidget(Note(
                 "accent", "ok",
-                f"<b>You have a good copy</b> — <a href='{good['number']}'>#{good['number']:04d}</a> "
-                "is another version of this disk, and it reads fully. Nothing is lost.",
-                [_esc(name)] + ([f"That version: {_esc(', '.join(what))}"] if what else []),
+                (f"<b>You have a repaired copy</b> — <a href='{good['number']}'>#{good['number']:04d}</a>, "
+                 "made by TurboCAT from this disk and files on your other disks. It isn't an original dump."
+                 if fixed else
+                 f"<b>Empty file, but you have a working copy</b> — "
+                 f"<a href='{good['number']}'>#{good['number']:04d}</a> is the same disk, and it reads "
+                 "fully. Nothing is lost; this empty file can be deleted."
+                 if item.status == "empty" else
+                 f"<b>You have a good copy</b> — <a href='{good['number']}'>#{good['number']:04d}</a> "
+                 "is another version of this disk, and it reads fully. Nothing is lost."),
+                [_esc(name)] + ([f"That version: {_esc(', '.join(what))}"]
+                                if what and item.status != "empty" else []),
                 on_link=lambda h: self.on_select_number(int(h))))
         warnings = collect("warnings")
         fs_issues = [w for w in warnings if FS_ISSUE in w]
@@ -1927,6 +2196,135 @@ class DetailsPanel(QFrame):
 
 class ScanStopped(Exception):
     pass
+
+
+class RepairWorker(QThread):
+    """Builds repaired copies one after another, with its own database connection."""
+    step = Signal(int, int, str)          # done, total, the disk being repaired
+    done = Signal(list, list)             # [repair.Result], [(plan, why it failed)]
+
+    def __init__(self, db_path, plans, mark=True):
+        super().__init__()
+        self.db_path, self.plans, self.mark = db_path, plans, mark
+        self.stop_wanted = False
+
+    def run(self):
+        cat = Catalogue(self.db_path)
+        made, failed = [], []
+        try:
+            for i, p in enumerate(self.plans):
+                if self.stop_wanted:
+                    break
+                self.step.emit(i, len(self.plans), f"#{p.number:04d} {p.source_file}")
+                try:
+                    made.append(repair.build(cat, p, mark=self.mark))
+                except Exception as ex:
+                    failed.append((p, str(ex)))
+        finally:
+            cat.db.close()
+        self.done.emit(made, failed)
+
+
+class FixAllDialog(QDialog):
+    """Fix all…: every damaged disk TurboCAT can fix, what it would do, and a go-ahead."""
+
+    def __init__(self, parent, plans, recheck, about):
+        super().__init__(parent)
+        self.setWindowTitle("Fix damaged disks")
+        self.plans = plans
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(12)
+        full = [p for p in plans if p.complete()]
+        part = [p for p in plans if not p.complete()]
+        head = QLabel("Fix these damaged disks?")
+        head.setFont(ui_font(16, QFont.Weight.DemiBold))
+        v.addWidget(head)
+        intro = []
+        if full:
+            intro.append(f"<b>{len(full)}</b> can be rebuilt completely: every damaged file is on your "
+                         "other disks.")
+        if part:
+            intro.append(f"<b>{len(part)}</b> can be rebuilt in part: some damaged files aren't anywhere "
+                         "else, so those copies would still be missing files"
+                         + (". They're unticked; tick any you want too." if full else
+                            ", but have more working files than the originals."))
+        if recheck:
+            intro.append(f"<b>{len(recheck)}</b> will be read again, now that the helper program they "
+                         "needed is installed.")
+        lab = _wrap_label("<br>".join(intro), ui_font(13))
+        lab.setTextFormat(Qt.TextFormat.RichText)
+        lab.setFixedWidth(600)
+        v.addWidget(lab)
+
+        self.list = QListWidget()
+        self.list.setMinimumHeight(220)
+        for p in full + part:
+            ok = len(p.usable())
+            it = QListWidgetItem(f"#{p.number:04d}  {p.source_file}   —   {ok} of {len(p.lost)} "
+                                 f"damaged file{'s' if len(p.lost) != 1 else ''} put back")
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            # partial ones are ticked only when there's nothing better: that's what was asked for
+            it.setCheckState(Qt.CheckState.Checked if p.complete() or not full else Qt.CheckState.Unchecked)
+            it.setToolTip("\n".join(
+                f"{'✓' if x in p.usable() else '✗'} {x.path}"
+                + (f"  from #{x.use.number:04d} {x.use.name}" if x in p.usable() else
+                   "  (several different versions: left out)" if x.confidence == "unsure" else
+                   "  (not on your other disks: left out)")
+                for x in p.lost))
+            it.setData(Qt.ItemDataRole.UserRole, p)
+            self.list.addItem(it)
+        v.addWidget(self.list)
+        self.count = QLabel()
+        self.count.setObjectName("muted")
+        v.addWidget(self.count)
+        self.about = about
+        self.list.itemChanged.connect(lambda _=None: self._count())
+
+        does = _wrap_label(
+            "<b>What TurboCAT will do</b><br>"
+            "• Make a <b>new</b> disk image for each ticked disk, with its damaged files put back. "
+            "Your originals stay exactly as they are.<br>"
+            "• Mark each one as repaired, not original: <i>[f TurboCAT]</i> in its name, and in the "
+            "catalogue. Ones still missing files are also marked <i>[b]</i>.<br>"
+            f"• Save them in {_esc(repair.REPAIRED_DIR)} and add them to the catalogue.<br>"
+            "• Leave out any file with several different versions: hover over a disk to see each file.",
+            ui_font(13))
+        does.setTextFormat(Qt.TextFormat.RichText)
+        does.setFixedWidth(600)
+        v.addWidget(does)
+        self.mark_box = QCheckBox("Also mark the disks themselves (recommended)")
+        self.mark_box.setChecked(True)
+        self.mark_box.setToolTip(f"Adds a {repair.MARKER} text file saying what was done, and a file note "
+                                 "on each restored file. Both show on a real Amiga.")
+        v.addWidget(self.mark_box)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        self.go = QPushButton("Fix them")
+        self.go.setObjectName("primary")
+        self.go.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        self.go.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(self.go)
+        v.addLayout(row)
+        self.recheck = recheck
+        self._count()
+
+    def chosen(self):
+        return [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())
+                if self.list.item(i).checkState() == Qt.CheckState.Checked]
+
+    def mark(self):
+        return self.mark_box.isChecked()
+
+    def _count(self):
+        n = len(self.chosen())
+        self.count.setText(f"Ticked: {n} of {self.list.count()} · {self.about(n)} · it runs with a "
+                           "progress bar, and Stop keeps the copies already made")
+        self.go.setEnabled(bool(n or self.recheck))
+        self.go.setToolTip("" if self.go.isEnabled() else "Tick at least one disk above")
 
 
 class ScanWorker(QThread):
@@ -3276,12 +3674,12 @@ class MainWindow(QMainWindow):
         self.result_label.setMinimumWidth(120)
         self.result_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         res_row.addWidget(self.result_label, 1)
-        self.fix_btn = QPushButton("Fix them now")
+        self.fix_btn = QPushButton("Fix all…")
         self.fix_btn.setFont(ui_font(12, QFont.Weight.DemiBold))
         self.fix_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.fix_btn.setToolTip("Read these items again with the helper programs now installed. "
-                                "Only TurboCAT's catalogue changes: the disk images are just read.")
-        self.fix_btn.clicked.connect(self.fix_fixable)
+        self.fix_btn.setToolTip("Shows what TurboCAT would do for each of these, and asks first. "
+                                "Your original disk images are never changed.")
+        self.fix_btn.clicked.connect(self.fix_all)
         self.fix_btn.hide()
         res_row.addWidget(self.fix_btn)
         self.group_btn = QPushButton("Group sets and versions")
@@ -3547,6 +3945,9 @@ class MainWindow(QMainWindow):
         self.act_folder = add(m, "Show in &folder", self.show_selected_in_folder, "Ctrl+Shift+O",
                               "Open the folder holding the selected item")
         self.act_recheck = add(m, "&Recheck", lambda: self.recheck_items(), "Shift+F5", RECHECK_TIP)
+        self.act_repair = add(m, "Make re&paired copy…", lambda: self.make_repaired_copy(), None,
+                              "Rebuild the selected damaged disk as a new image, putting back its damaged "
+                              "files from copies on your other disks (asks first; the original isn't changed)")
 
         m = bar.addMenu("&Tools")
         self.act_online = add(m, "Find pictures &online", self.find_online, None,
@@ -3609,6 +4010,7 @@ class MainWindow(QMainWindow):
             self.act_gotek.setText(f"Copy {n:,} to &Gotek stick…" if n > 1 else "Copy to &Gotek stick…")
             for a in (self.act_play, self.act_gotek, self.act_folder, self.act_recheck):
                 a.setEnabled(bool(ids))
+            self.act_repair.setEnabled(any(it.status == "error" and not it.repaired for it in chosen))
             self.act_recheck.setText(f"&Recheck {n:,} items" if n > 1 else "&Recheck")
             self.act_fav.setText("Remove from &favourites" if chosen and all(c.favourite for c in chosen)
                                  else "Add to &favourites")
@@ -3928,13 +4330,155 @@ class MainWindow(QMainWindow):
         self._start_scan(None, f"Rescanning {len(roots)} folder{'s' if len(roots) > 1 else ''}…")
         self.scan_bar.setToolTip("Rescanning:\n" + "\n".join(roots))
 
-    def fix_fixable(self):
-        """Read again every item that a helper program installed since can now read."""
-        ids = [it.id for it in self.all_items
-               if any(here for _, _, here in it.fixable)]
-        if ids:
-            self.fix_btn.hide()
-            self.recheck_items(self._expand(ids))
+    def make_repaired_copy(self, media_id=None):
+        """Disk > Make repaired copy…: say what would be done, ask, then build it."""
+        if self.worker is not None:
+            self.result_label.setText("Wait for the scan to finish, then try again.")
+            return
+        ids = [media_id] if media_id else self._expand(self.selected_ids())
+        p = next((x for x in (repair.plan(self.cat, i) for i in ids) if x), None)
+        if p is None:
+            QMessageBox.information(self, "Make repaired copy",
+                                    "None of the selected disks has damaged files that TurboCAT can "
+                                    "put back. (It can only rebuild AmigaDOS floppy disks.)")
+            return
+        if not p.usable(with_unsure=True):
+            QMessageBox.information(
+                self, "Make repaired copy",
+                f"#{p.number:04d} can't be repaired from your collection: none of its damaged files "
+                "are on your other disks.")
+            return
+        ask = RepairDialog(self, p)
+        if ask.exec() != QDialog.DialogCode.Accepted:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            res = repair.build(self.cat, p, with_unsure=ask.with_unsure(), mark=ask.mark())
+        except Exception as ex:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Make repaired copy",
+                                f"The repaired copy wasn't made: {ex}\n\nNothing was written, and your "
+                                "original is unchanged.")
+            return
+        QApplication.restoreOverrideCursor()
+        self._start_scan([repair.REPAIRED_DIR], "Adding the repaired copy to the catalogue…")
+        self.result_label.setText(
+            f"Made {os.path.basename(res.path)}: {len(res.restored)} file"
+            f"{'s' if len(res.restored) != 1 else ''} put back"
+            + (f", {len(res.missing)} still missing" if res.missing else "")
+            + f" · in {repair.REPAIRED_DIR}")
+
+    def _save_missing(self, results):
+        """Save the files the repaired copies still lack, as a spreadsheet to work from."""
+        import csv
+        path, _ = QFileDialog.getSaveFileName(self, "Save the list of missing files",
+                                              os.path.expanduser("~/TurboCAT missing files.csv"),
+                                              "Spreadsheet (*.csv)")
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["Disk", "Missing file", "Size (bytes)", "Repaired copy"])
+            for r in results:
+                for x in r.missing:
+                    w.writerow([r.original, x.path, x.size, os.path.basename(r.path)])
+        self.result_label.setText(f"Saved the missing files to {path}")
+
+    def fix_all(self):
+        """Fix all…: rebuild every damaged disk that files on other disks can fix, and read again
+        those a newly installed helper program can read. Shows what it will do and asks first."""
+        if self.worker is not None or getattr(self, "repairer", None) is not None:
+            return
+        ids = set(self._expand([it.id for it in self.model.items if can_fix(it)]))
+        disks = [it for it in self.all_items if it.id in ids and can_fix(it)]
+        recheck = [it for it in disks if any(here for _, _, here in it.fixable)]
+        plans = list(repair.plan_all(self.cat, [it.id for it in disks
+                                                if it.rebuild and it.rebuild[0]]).values())
+        plans = [p for p in plans if p.usable()]
+        if not plans and not recheck:
+            return
+        per = 0.6                                   # seconds per disk, measured on a MacBook
+
+        def about(n):
+            secs = n * per
+            return ("a few seconds" if secs < 10 else f"about {int(secs) + 1} seconds" if secs < 60
+                    else self._about(secs))
+        dlg = FixAllDialog(self, plans, recheck, about)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen, files = dlg.chosen(), [it.path for it in recheck]
+        if not chosen:
+            if files:
+                self._start_scan(None, "Reading them again…", files=files)
+            return
+        prog = QProgressDialog("Getting ready…", "Stop", 0, len(chosen), self)
+        prog.setWindowTitle("Fixing damaged disks")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setMinimumWidth(520)
+        started = time.monotonic()
+        self.cat.add_scan_roots([repair.REPAIRED_DIR])     # so a Rescan finds them, whatever happens
+        w = self.repairer = RepairWorker(self.db_path, chosen, dlg.mark())
+
+        def step(done, total, name):
+            prog.setValue(done)
+            left = ""
+            if done:
+                secs = (time.monotonic() - started) / done * (total - done)
+                left = " · " + ("a few seconds left" if secs < 10 else
+                                f"about {int(secs) + 1} seconds left" if secs < 60 else
+                                self._about(secs) + " left")
+            prog.setLabelText(f"Repairing {done + 1} of {total}{left}\n{name}")
+
+        def finished(made, failed):
+            prog.setValue(len(chosen))
+            prog.close()
+            self.repairer = None
+            if getattr(self, "closing", False):
+                return                  # closing: what's made is on disk; the next scan adds it
+            if made or files:
+                self._start_scan(None, "Adding the repaired copies to the catalogue…",
+                                 files=[r.path for r in made] + files)
+            stopped = len(made) + len(failed) < len(chosen)
+            short = [r for r in made if r.missing]
+            self.result_label.setText(
+                f"Made {_n(len(made), 'repaired copy')}".replace("copys", "copies")
+                + (f" · {len(short)} still missing files (marked [b])" if short else "")
+                + (f" · {len(failed)} couldn't be made" if failed else "")
+                + (" · stopped: the rest were left" if stopped else "")
+                + f" · in {repair.REPAIRED_DIR}")
+            lines = [f"Made {_n(len(made), 'repaired copy')}.".replace("copys", "copies")]
+            if short:
+                lines.append(f"\n{len(short)} of them are still missing files, because those files "
+                             "aren't anywhere in your collection. They're marked [b]:")
+                for r in short[:8]:
+                    names = ", ".join(x.name for x in r.missing[:4]) + (" …" if len(r.missing) > 4 else "")
+                    disk = os.path.splitext(r.original)[0]
+                    disk = disk if len(disk) <= 50 else disk[:49] + "…"
+                    lines.append(f"   {disk}: {names}")
+                if len(short) > 8:
+                    lines.append(f"   … and {len(short) - 8} more (Save list… has them all)")
+                lines.append("\n" + repair.FINISH_IT)
+            if stopped:
+                lines.append("Stopped: the rest were left as they were.")
+            if failed:
+                lines.append(f"\n{len(failed)} couldn't be made, and nothing was written for them:")
+                lines += [f"   #{p.number:04d} {p.source_file}: {why}" for p, why in failed[:15]]
+            lines.append(f"\nThey're in {repair.REPAIRED_DIR}, and are being added to the catalogue now. "
+                         "Your original disk images haven't been changed.")
+            box = QMessageBox(QMessageBox.Icon.Warning if failed else QMessageBox.Icon.Information,
+                              "Fixing damaged disks", "\n".join(lines), parent=self)
+            save = box.addButton("Save list of missing files…", QMessageBox.ButtonRole.ActionRole) \
+                if short else None
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            if save is not None and box.clickedButton() is save:
+                self._save_missing(short)
+
+        w.step.connect(step)
+        w.done.connect(finished)
+        prog.canceled.connect(lambda: setattr(w, "stop_wanted", True))
+        w.start()
 
     def recheck_items(self, ids=None):
         """Disk > Recheck: read the chosen items again, and look in their folders for disks
@@ -4494,7 +5038,8 @@ class MainWindow(QMainWindow):
     def _busy(self):
         """What is still running in the background, in words (empty if nothing)."""
         return " and ".join(w for w, t in (("the scan", self.worker), ("the picture search", self.pic_worker),
-                                           ("updating TurboView", getattr(self, "tv_worker", None)))
+                                           ("updating TurboView", getattr(self, "tv_worker", None)),
+                                           ("the repairs", getattr(self, "repairer", None)))
                             if t is not None)
 
     def closeEvent(self, event):
@@ -4510,7 +5055,7 @@ class MainWindow(QMainWindow):
             super().closeEvent(event)
             return
         event.ignore()
-        for t in (self.worker, self.pic_worker, self.tv_worker):
+        for t in (self.worker, self.pic_worker, self.tv_worker, getattr(self, "repairer", None)):
             if t is not None:
                 t.stop_wanted = True
                 t.finished.connect(self._close_when_idle)
@@ -4640,13 +5185,23 @@ class MainWindow(QMainWindow):
                 f"Problems {len(shown):,} of {len(self.all_items):,} items" + (
                     f" · {_n(spared, 'damaged disk')} not counted: you have a good copy"
                     if spared else ""))
+        elif self.filter == "empty" and not text:
+            spared = sum(1 for it in everything if it.status == "empty" and it.good_copy)
+            self.result_label.setText(
+                f"Empty {len(shown):,} of {len(self.all_items):,} items: files of 0 bytes, nothing in them"
+                + (f" · {_n(spared, 'more empty file')} not listed: you have a working copy of each"
+                   if spared else ""))
         elif self.filter == "fixable":
+            full = sum(1 for it in shown if it.rebuild and it.rebuild[0] == it.rebuild[1])
+            part = sum(1 for it in shown if it.rebuild and 0 < it.rebuild[0] < it.rebuild[1])
             now = [it for it in shown if any(here for _, _, here in it.fixable)]
             need = sorted({pkg for it in shown for _, pkg, here in it.fixable if not here})
-            self.result_label.setText(
-                f"{_n(len(shown), 'item')} couldn't be read fully for want of a helper program"
-                + (f" · {len(now):,} can be fixed now" if now else "")
-                + (f" · install {', '.join(need)} for the rest (Help › Check setup)" if need else ""))
+            bits = ([f"{full:,} can be rebuilt from files on your other disks"] if full else []) + (
+                [f"{part:,} partly"] if part else []) + (
+                [f"{len(now):,} can be read now that a helper program is installed"] if now else []) + (
+                [f"install {', '.join(need)} for {'the rest' if (full or part or now) else 'these'} "
+                 "(Help › Check setup)"] if need else [])
+            self.result_label.setText(f"{_n(len(shown), 'damaged item')} can be fixed · " + " · ".join(bits))
         elif self.filter == "dups":
             sets = len({it.dup_key for it in shown})
             self.result_label.setText(
@@ -4665,7 +5220,7 @@ class MainWindow(QMainWindow):
             self.result_label.setText(self.result_label.text() + f" · {_n(empty_hidden, 'empty file')} "
                                       "hidden (see Empty)")
         self.fix_btn.setVisible(self.filter == "fixable" and self.worker is None and any(
-            here for it in shown for _, _, here in it.fixable))
+            any(here for _, _, here in it.fixable) or (it.rebuild and it.rebuild[0]) for it in shown))
         keep = set(self.selected_ids()) if self.model.items else set()
         self.model.set_items(shown)
         if shown:

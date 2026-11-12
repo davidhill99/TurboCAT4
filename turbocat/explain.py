@@ -43,7 +43,7 @@ def damaged_paths(messages):
                 if depth == 0:
                     cut = i
                     break
-        path = rest[:cut].rstrip()
+        path = rest[:cut - 1] if cut and rest[cut - 1] == " " else rest[:cut]   # names can end in a space
         if path and path not in out:
             out.append(path)
     return out

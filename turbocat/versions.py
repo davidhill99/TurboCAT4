@@ -102,7 +102,8 @@ def mark(items, cat):
 
 
 def mark_good_copies(items, groups):
-    """A damaged disk (Problem) with a version that reads fully gets .good_copy: that version's id
+    """A damaged disk (Problem) or an empty file with a version that reads fully gets .good_copy:
+    that version's id
     (the best one, preferring the version shown). A version TOSEC tags as a bad dump [b] doesn't
     count, even if it reads: its contents are known to be damaged. Spare copies of the damaged
     disk get it too: they are the same bytes."""
@@ -112,7 +113,7 @@ def mark_good_copies(items, groups):
                    and not any(t.startswith("b") for t in tags(name_of(it)))]
         healthy.sort(key=lambda it: (bool(it.version_of),) + order(it))
         for it in group:
-            if it.status != "error":
+            if it.status not in ("error", "empty"):
                 continue
             # a version with no files to read can't stand in for a disk that has files
             usable = [h for h in healthy if _has_files(h) or not _has_files(it)]

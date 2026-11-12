@@ -88,6 +88,11 @@ class GoodCopyTest(unittest.TestCase):
         versions.mark([a, b], self.cat)
         self.assertFalse(hasattr(a, "good_copy") or hasattr(b, "good_copy"))
 
+    def test_an_empty_file_points_to_a_working_version(self):
+        empty, good = item(1, ".zip", "empty"), item(2, "[a].zip")
+        versions.mark([empty, good], self.cat)
+        self.assertEqual(empty.good_copy, 2)
+
     def test_a_bad_dump_that_reads_is_not_a_good_copy(self):
         bad, also_bad = item(1, ".zip", "error"), item(2, "[b virus damage].zip")
         versions.mark([bad, also_bad], self.cat)

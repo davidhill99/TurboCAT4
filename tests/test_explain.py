@@ -13,6 +13,7 @@ class ExplainTest(unittest.TestCase):
     def test_damaged_files_named(self):
         self.assertEqual(explain.damaged_paths(self.MSGS), ["GuruInfo/Guru.Info"])
         self.assertEqual(explain.damaged_paths(["file unreadable: A (b) (x (y))"]), ["A (b)"])
+        self.assertEqual(explain.damaged_paths(["file unreadable: dlair #4  (bad block)"]), ["dlair #4 "])
 
     def test_summary_counts_files(self):
         self.assertEqual(explain.summary(self.MSGS, 220), "1 of 220 files damaged — the other 219 read fine")

@@ -32,6 +32,40 @@ What changed in each release, newest first. Work not yet in a numbered release i
 - A damaged disk that matches a collection list exactly no longer says "Verified … undamaged":
   it says the damage was already in the collection's copy. A version with no readable files is
   never taken as a good copy
+- **Make repaired copy…** (repair R4): on a damaged floppy whose damaged files are on your other
+  disks, a button in Details (and Disk › Make repaired copy…) shows what TurboCAT would do — each
+  file, the disk it comes from and how sure the match is — and asks first. It then writes a **new**
+  disk image to `~/TurboCAT/Repaired` and adds it to the catalogue; the original is only read.
+  The copy is rebuilt file by file, checked (no filesystem errors, every file as planned) and marked
+  as not original: `[f TurboCAT]` in its name, a `Repaired-by-TurboCAT` note on the disk and a file
+  note on each restored file (can be turned off), and a log (`~/.local/share/turbocat/repairs.csv`)
+  so TurboCAT recognises it even if renamed. A boot block that looks like a virus is replaced with
+  the standard one. Repaired copies get a **Repaired copies** chip and say so in Details; the damaged
+  original points to its repaired copy, and a disk set counts it, so a set can become complete
+- The list says how each damaged disk can be fixed, next to its Problem badge: **Can be rebuilt**,
+  **Partly rebuildable**, **Can be fixed now** / **Fix: install …**, **Partly repaired** or
+  **Repaired copy** (hover for details). The **Can be fixed** chip now covers rebuildable disks too
+- **Fix all…** on the Can be fixed chip: one window lists every disk TurboCAT can fix, complete
+  rebuilds ticked and partial ones unticked (hover a disk for each file and where it comes from),
+  says what it will do and roughly how long, and asks first. The repairs run with a progress
+  window and time left; Stop keeps the copies already made. A summary says what was made
+- A replacement file that can't be read from one disk is taken from another identical copy;
+  overdumped source disks are read at their normal size, and files are taken from archives
+  sitting on disk images (e.g. ZIP › ADF › LHA). A damaged disk is linked to its repaired
+  copy through TurboCAT's repair log, so it works even when the names differ
+- After a partial repair TurboCAT says what's still missing and how to finish the job: the Fix all
+  summary lists each disk's missing files (with **Save list of missing files…** for a spreadsheet),
+  the repaired copy says **Still missing …**, and the original says **Partly repaired** with a link to
+  its copy; hover for how to fix it fully (get a good copy, or add disks that have the files). When
+  a later scan finds every missing file, the original says **Can be fully rebuilt now** and goes
+  back under Can be fixed
+- Fix all no longer leaves partial rebuilds unticked when they are all that is left
+- An empty file (0 bytes) of a disk you have a working copy of — the same coverdisk (magazine,
+  issue and disk), or another version of the same disk — says **Empty file, but you have a working
+  copy**, with a link to it, and is left out of the Empty list, which now shows only what is really
+  missing. The Empty line says how many were left out
+- Damaged files whose names end in a space are recognised; a file that turns out unreadable while
+  copying is left out and listed as missing instead of stopping that disk's repair
 - When a helper program (lha, 7-Zip, xdms) is installed after a scan, the next scan or Rescan reads
   again, once, the items that couldn't be read without it, even though their files haven't changed.
   Before, they stayed "unreadable" until rechecked by hand
