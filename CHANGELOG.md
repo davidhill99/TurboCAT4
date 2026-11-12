@@ -11,6 +11,17 @@ What changed in each release, newest first. Work not yet in a numbered release i
   Workbench 1.3–3.x C: commands) count as common system files wherever they are on a disk, not
   only inside `C/`, so copies that games keep in their own root or drawers are grouped with the
   other system files instead of listed as duplicates
+- Old LHA archives packed with the 1990–91 `-lh1-` method need `lha` (from the `lhasa` package):
+  7-Zip can't open them, so Help › Check setup no longer counts 7-Zip alone as enough
+- Details: an item that couldn't be read for want of a helper program (lha, xdms) gets a
+  **Can be fixed on this computer** note saying what to install; once it is installed, the note
+  becomes **Can be fixed now** and points to Disk › Recheck
+- New **Can be fixed** filter chip lists those items (it only appears when there are some), and
+  says what to install for the rest; **Fix them now** reads again every one that can be fixed
+  with what is installed already
+- When a helper program (lha, 7-Zip, xdms) is installed after a scan, the next scan or Rescan reads
+  again, once, the items that couldn't be read without it, even though their files haven't changed.
+  Before, they stayed "unreadable" until rechecked by hand
 
 ## 4.0.0-alpha.4 — 8–10 Nov 2026
 

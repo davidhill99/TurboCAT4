@@ -198,6 +198,21 @@ class Catalogue:
             (source, size, mtime)).fetchone()
         return row is not None
 
+    def sources_with_message(self, starts):
+        """Files whose item, or anything inside it, has a problem or warning starting with one of
+        these texts (e.g. "LHA archive unreadable")."""
+        if not starts:
+            return set()
+        cond = " OR ".join(["m.problems LIKE ? OR m.warnings LIKE ?"] * len(starts))
+        args = [a for s in starts for a in (f'%"{s}%', f'%"{s}%')]
+        rows = self.db.execute(
+            "WITH RECURSIVE up(id, top) AS ("
+            " SELECT id, id FROM media WHERE parent_id IS NULL"
+            " UNION ALL SELECT c.id, up.top FROM media c JOIN up ON c.parent_id = up.id)"
+            f" SELECT DISTINCT t.source FROM up JOIN media m ON m.id = up.id"
+            f" JOIN media t ON t.id = up.top WHERE {cond}", args).fetchall()
+        return {r[0] for r in rows}
+
     def remove_source(self, source):
         """Remove an item before rescanning it; returns its old number (or None)."""
         row = self.db.execute("SELECT number FROM media WHERE source=? AND parent_id IS NULL",

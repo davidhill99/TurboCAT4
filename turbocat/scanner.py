@@ -246,6 +246,12 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
         else:
             todo.append((None, p))
 
+    # Items that couldn't be read fully for want of a helper program (lha, xdms) that has been
+    # installed since: read them again once, even though their files haven't changed.
+    tools_now = readers.helper_tools()
+    new_tools = set(tools_now) - set(catalogue.get_meta("helper_tools", []))
+    retry = catalogue.sources_with_message(sorted({readers.HELPER_TOOLS[t] for t in new_tools}))
+
     # Pass 1 - decide what needs reading. Cheap: a size and date check for files already
     # catalogued, and the first 1 KB of anything new to recognise it.
     work = []
@@ -261,7 +267,8 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
             work.append(("folder", path, FOLDER_WEIGHT))
             continue
         size, mtime = st.st_size, st.st_mtime
-        if not rescan and path not in force and catalogue.known_unchanged(path, size, mtime):
+        if (not rescan and path not in force and path not in retry
+                and catalogue.known_unchanged(path, size, mtime)):
             summary["skipped"] += 1
             continue
         try:
@@ -352,4 +359,6 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
             progress(f"#{number:04d} {kind.upper():6} {os.path.basename(path)}{flag}")
     if step:
         step("reading", len(work), len(work), total_bytes, total_bytes, "")
+    if retry <= {p for _, p in todo}:
+        catalogue.set_meta("helper_tools", tools_now)   # all read again with the tools there are now
     return summary

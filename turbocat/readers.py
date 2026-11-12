@@ -328,9 +328,34 @@ def read_hdf(path_or_data) -> ContainerResult:
 # ---------------------------------------------------------------- archives
 
 # (program, arguments, folder to run it in): lha (lhasa or jlha) also reads -lh1-, and is run inside
-# the output folder because jlha ignores w=<dir>.
+# the output folder because jlha ignores w=<dir>. 7-Zip reads some header types but not -lh1-.
 LHA_TOOLS = (("7z", ["x", "-y", "-bd", "-bso0", "-bsp0", "-oout", "--", "arc.lha"], "."),
              ("lha", ["xqf", "../arc.lha"], "out"))
+
+# Helper programs, and the start of the problem or warning an item gets when one couldn't help.
+# When one of these is installed after a scan, the items with its message are read again once.
+HELPER_TOOLS = {"7z": "LHA archive unreadable", "lha": "LHA archive unreadable",
+                "xdms": "DMS not unpacked"}
+
+
+def helper_tools():
+    """The helper programs installed on this computer."""
+    return sorted(t for t in HELPER_TOOLS if shutil.which(t))
+
+
+# What to install to fix an item with one of these messages: (message start, program, package)
+LOCAL_FIXES = (("LHA archive unreadable", "lha", "lhasa"),
+               ("DMS not unpacked", "xdms", "xdms"))
+
+
+def local_fixes(messages):
+    """The helper programs that would let TurboCAT read what these problems or warnings say it
+    couldn't: [(program, package, installed now)], one per program."""
+    out = []
+    for start, prog, pkg in LOCAL_FIXES:
+        if any(start in m for m in messages):
+            out.append((prog, pkg, shutil.which(prog) is not None))
+    return out
 
 
 def _lha_with_tool(data):
@@ -383,9 +408,7 @@ def read_lha(data: bytes) -> ContainerResult:
     except Exception as ex:
         files = _lha_with_tool(data)
         if files is None:
-            res.problems.append(f"LHA archive unreadable: {ex}" + (
-                "" if any(shutil.which(t) for t, _, _ in LHA_TOOLS)
-                else " (installing 7-Zip or lha lets TurboCAT open older LHA archives)"))
+            res.problems.append(f"LHA archive unreadable: {ex}")
         else:
             res.files = files
         return res

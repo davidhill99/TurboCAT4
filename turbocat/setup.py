@@ -86,11 +86,14 @@ def run(emulators=None, kickstarts=None, music_versions=None):
         out.append(Check("lhafile", "Opens LHA archives (WHDLoad games and most PD archives)", MISSING,
                          without="LHA archives are catalogued but not opened", command=_pip("lhafile")))
     tools = [t for t in ("7z", "lha") if shutil.which(t)]
+    has_lha = "lha" in tools                 # only lha reads -lh1-; 7-Zip helps with header types
     out.append(Check(
-        "7-Zip or lha", "Opens older LHA archives the built-in reader can't (the -lh1- method of "
-        "1990–91, some header types)", OK if tools else MISSING, ", ".join(tools),
-        without="" if tools else "Some LHA archives on old disks show as unreadable",
-        command="" if tools else _install({"apt": "p7zip-full lhasa", "dnf": "p7zip lhasa",
+        "lha (lhasa)", "Opens older LHA archives the built-in reader can't (the -lh1- method of "
+        "1990–91; 7-Zip also helps with some header types)", OK if has_lha else MISSING,
+        ", ".join(tools),
+        without="" if has_lha else ("LHA archives packed with the 1990–91 -lh1- method show as "
+                                    "unreadable" + (" (7-Zip can't open them)" if tools else "")),
+        command="" if has_lha else _install({"apt": "p7zip-full lhasa", "dnf": "p7zip lhasa",
                                            "pacman": "p7zip lhasa", "mac": "p7zip lhasa",
                                            "windows": "7zip.7zip"}, s),
         important=False))

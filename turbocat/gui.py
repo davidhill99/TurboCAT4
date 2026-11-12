@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QTableView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
 from . import APP_NAME, VERSION
+from . import readers
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
 from . import coverdisks, datlists, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
@@ -89,6 +90,7 @@ FILTERS = [
     ("roms", "Kickstart ROMs", "chip", lambda it: it.type == "Kickstart"),
     ("problems", "Problems", "problem", lambda it: it.status == "error"),
     ("warnings", "Warnings", "warning", lambda it: it.status == "warning"),
+    ("fixable", "Can be fixed", "tool", lambda it: bool(it.fixable)),
     ("dups", "Duplicates", "duplicate", lambda it: it.copies > 1),
     ("sets", "Sets to complete", "disk", lambda it: it.set_problem),
     ("whd", "WHDLoad games", "game", lambda it: it.type == "WHDLoad"),
@@ -216,6 +218,7 @@ class Item:
     key: str = ""               # pictures / music key
     music: int = 0              # music modules found inside
     cover: object = None        # a coverdisks.Coverdisk: the magazine, issue and disk it came with
+    fixable: tuple = ()         # readers.local_fixes: helper programs that would let it be read
     search_blob: str = field(default="", repr=False)
 
 
@@ -330,7 +333,9 @@ def load_items(cat):
             tosec_name=identify.stem(known[m["id"]][0]) if m["id"] in known else "",
             identified_by=known[m["id"]][1] if m["id"] in known else "",
             name_guess="" if m["id"] in known else identify.guess(m["source"]),
-            key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0), cover=cover))
+            key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0), cover=cover,
+            fixable=tuple(readers.local_fixes(
+                [x for r in [m] + kids for f in ("problems", "warnings") for x in _j(r[f], [])]))))
     dupes.mark(items, cat)
     vers.mark(items, cat)
     return items
@@ -376,7 +381,8 @@ def make_set_items(items):
             favourite=any(m.favourite for m in members),
             key=first.key, music=sum(m.music for m in members),
             members=tuple(m.id for m in members), set_badge=badge, set_tone=tone,
-            set_problem=not ds.complete, dset=ds, cover=cover)
+            set_problem=not ds.complete, dset=ds, cover=cover,
+            fixable=tuple(sorted({f for m in members for f in m.fixable})))
         rows.append(row)
         for n, m, _ in ds.disks:
             member_of[m.id] = row
@@ -1685,6 +1691,17 @@ class DetailsPanel(QFrame):
         warnings = [w for w in warnings if FS_ISSUE not in w]
         if warnings:
             self.notes.addWidget(Note("warn", "warning", "<b>Warning</b>", warnings))
+        for prog, pkg, here in readers.local_fixes(collect("problems") + collect("warnings")):
+            if here:
+                self.notes.addWidget(Note(
+                    "accent", "tool", "<b>Can be fixed now</b> — "
+                    f"{_esc(prog)} has been installed since this was read. Disk › Recheck "
+                    "(Shift+F5) reads it again; so will the next scan of its folder."))
+            else:
+                self.notes.addWidget(Note(
+                    "accent", "tool", "<b>Can be fixed on this computer</b> — "
+                    f"install {_esc(pkg)}, then scan this folder again and TurboCAT will read "
+                    "it properly. Help › Check setup shows how to install it."))
         if fs_issues:
             self.notes.addWidget(Note(
                 "warn", "warning",
@@ -3196,6 +3213,14 @@ class MainWindow(QMainWindow):
         self.result_label.setMinimumWidth(120)
         self.result_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         res_row.addWidget(self.result_label, 1)
+        self.fix_btn = QPushButton("Fix them now")
+        self.fix_btn.setFont(ui_font(12, QFont.Weight.DemiBold))
+        self.fix_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fix_btn.setToolTip("Read these items again with the helper programs now installed. "
+                                "Only TurboCAT's catalogue changes: the disk images are just read.")
+        self.fix_btn.clicked.connect(self.fix_fixable)
+        self.fix_btn.hide()
+        res_row.addWidget(self.fix_btn)
         self.group_btn = QPushButton("Group sets and versions")
         self.group_btn.setObjectName("segment")
         self.group_btn.setCheckable(True)
@@ -3839,6 +3864,14 @@ class MainWindow(QMainWindow):
             return
         self._start_scan(None, f"Rescanning {len(roots)} folder{'s' if len(roots) > 1 else ''}…")
         self.scan_bar.setToolTip("Rescanning:\n" + "\n".join(roots))
+
+    def fix_fixable(self):
+        """Read again every item that a helper program installed since can now read."""
+        ids = [it.id for it in self.all_items
+               if any(here for _, _, here in it.fixable)]
+        if ids:
+            self.fix_btn.hide()
+            self.recheck_items(self._expand(ids))
 
     def recheck_items(self, ids=None):
         """Disk > Recheck: read the chosen items again, and look in their folders for disks
@@ -4537,6 +4570,13 @@ class MainWindow(QMainWindow):
             self.result_label.setText(
                 f"{_n(len(shown), 'disk set')} with missing or damaged disks · "
                 "File › Export sets to complete… saves what each one needs")
+        elif self.filter == "fixable":
+            now = [it for it in shown if any(here for _, _, here in it.fixable)]
+            need = sorted({pkg for it in shown for _, pkg, here in it.fixable if not here})
+            self.result_label.setText(
+                f"{_n(len(shown), 'item')} couldn't be read fully for want of a helper program"
+                + (f" · {len(now):,} can be fixed now" if now else "")
+                + (f" · install {', '.join(need)} for the rest (Help › Check setup)" if need else ""))
         elif self.filter == "dups":
             sets = len({it.dup_key for it in shown})
             self.result_label.setText(
@@ -4554,6 +4594,8 @@ class MainWindow(QMainWindow):
         if empty_hidden:
             self.result_label.setText(self.result_label.text() + f" · {_n(empty_hidden, 'empty file')} "
                                       "hidden (see Empty)")
+        self.fix_btn.setVisible(self.filter == "fixable" and self.worker is None and any(
+            here for it in shown for _, _, here in it.fixable))
         keep = set(self.selected_ids()) if self.model.items else set()
         self.model.set_items(shown)
         if shown:
