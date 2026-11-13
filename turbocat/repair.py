@@ -74,6 +74,7 @@ class Plan:
     source_file: str                  # the damaged image's own file (top level)
     lost: List[Lost]
     total_files: int = 0
+    tidy: bool = False                # every file reads; only the disk's index (directory) is wrong
 
     def usable(self, with_unsure=False):
         ok = ("strong", "likely", "unsure") if with_unsure else ("strong", "likely")
@@ -261,6 +262,36 @@ def _plan_all(cat, top_ids=None):
     return out
 
 
+# How the scan words a directory error on a disk whose files all read (readers.py)
+FS_ISSUE = "filesystem inconsistency, but every file reads: "
+
+
+def untidy_disk(cat, top_id):
+    """The floppy image in this item whose index (directory) has errors although every file reads,
+    or None."""
+    top = cat.media_by_id(top_id)
+    if top is None:
+        return None
+    for r in [top] + _descendants(cat, top_id):
+        if r["kind"] in FLOPPY and any(FS_ISSUE in w for w in _j(r["warnings"])) \
+                and not explain.damaged_paths(_j(r["problems"])):
+            return r
+    return None
+
+
+def tidy_plan(cat, top_id):
+    """A plan for a tidied copy: the same files, in a fresh, correct index. None if the item has
+    no such disk."""
+    disk = untidy_disk(cat, top_id)
+    if disk is None:
+        return None
+    top = cat.media_by_id(top_id)
+    total = cat.db.execute("SELECT COUNT(*) FROM files WHERE media_id=? AND NOT is_dir",
+                           (disk["id"],)).fetchone()[0]
+    return Plan(top_id, disk["id"], top["number"] or 0, disk["volume"] or "",
+                os.path.basename(top["source"].rstrip("/")), [], total, tidy=True)
+
+
 def repaired_name(name, complete):
     """'Disk (1991)(PD)[v Saddam][b virus damage].zip' -> 'Disk (1991)(PD)[f TurboCAT].adf'.
     A partial repair keeps [b]: it is still missing files."""
@@ -389,11 +420,29 @@ def build(cat, p, out_dir=None, with_unsure=False, mark=True, log=None):
     restored, extra = [], []
 
     def copy(src_dir, dst_dir, prefix):
+        taken = {}                        # names used in this folder (AmigaDOS ignores case): data
         for e in src_dir.get_entries_sorted_by_name():
             name = e.get_file_name().get_unicode_name()
             path = prefix + name
             mi = e.get_meta_info()
+            if name.lower() in taken:
+                # A broken index can list one name twice. The same file again is left out;
+                # anything else is kept under a new name. Either way the marker note says so.
+                try:
+                    data = None if e.is_dir() else bytes(e.get_file_data())
+                except Exception:
+                    data = None
+                if not e.is_dir() and data is not None and data == taken[name.lower()]:
+                    notes.append(f"{path} was listed twice in the original's index; the copy has it once.")
+                    continue
+                n = 2
+                while f"{name}.{n}".lower() in taken:
+                    n += 1
+                notes.append(f"{path} was listed twice in the original's index, with different "
+                             f"contents; the second is kept as {name}.{n}.")
+                name, path = f"{name}.{n}", f"{prefix}{name}.{n}"
             if e.is_dir():
+                taken[name.lower()] = None
                 d = dst_dir.create_dir(FSString(name), meta_info=mi, update_ts=False)
                 copy(e, d, path + "/")
                 continue
@@ -403,6 +452,7 @@ def build(cat, p, out_dir=None, with_unsure=False, mark=True, log=None):
                 if mark and (comment is None or not comment.get_unicode()):
                     comment = FSString(f"Restored by TurboCAT {today} from #{x.use.number:04d}"[:79])
                 mi = MetaInfo(protect=mi.get_protect(), mod_ts=mi.get_mod_ts(), comment=comment)
+                taken[name.lower()] = data_for[path]
                 dst_dir.create_file(FSString(name), data_for[path], meta_info=mi, update_ts=False)
                 restored.append(x)
                 continue
@@ -413,6 +463,7 @@ def build(cat, p, out_dir=None, with_unsure=False, mark=True, log=None):
             except Exception:             # damaged, though the scan didn't say so: left out too
                 extra.append(Lost(path, e.get_size()))
                 continue
+            taken[name.lower()] = data
             dst_dir.create_file(FSString(name), data, meta_info=mi, update_ts=False)
 
     copy(old.get_root_dir(), new.get_root_dir(), "")
@@ -429,9 +480,12 @@ def build(cat, p, out_dir=None, with_unsure=False, mark=True, log=None):
     dev.flush()
     out = fobj.getvalue()
     gone = {x.path for x in extra}
-    kept = {r["path"]: r["sha1"] for r in cat.db.execute(
-        "SELECT path, sha1 FROM files WHERE media_id=? AND NOT is_dir AND sha1 IS NOT NULL",
-        (p.disk_id,)) if r["path"] not in gone}
+    kept = {}                     # path -> its checksums (a broken index can list a name twice)
+    for r in cat.db.execute(
+            "SELECT path, sha1 FROM files WHERE media_id=? AND NOT is_dir AND sha1 IS NOT NULL",
+            (p.disk_id,)):
+        if r["path"] not in gone:
+            kept.setdefault(r["path"], set()).add(r["sha1"])
     _check(out, restored, data_for, kept)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -451,16 +505,28 @@ def _check(out, restored, data_for, kept):
     res = readers.read_adf(out)
     if res.problems:
         raise ValueError("the repaired copy didn't check out: " + res.problems[0])
+    if res.fs_issues:
+        raise ValueError("the new copy's index still has errors: " + res.fs_issues[0])
     vol = _volume(out)
     for x in restored:
         if bytes(_node(vol, x.path).get_file_data()) != data_for[x.path]:
             raise ValueError(f"{x.name} didn't read back correctly")
-    for path, sha in kept.items():
-        if hashlib.sha1(bytes(_node(vol, path).get_file_data())).hexdigest() != sha:
+    for path, shas in kept.items():
+        if hashlib.sha1(bytes(_node(vol, path).get_file_data())).hexdigest() not in shas:
             raise ValueError(f"{path} didn't copy across correctly")
 
 
 def _marker_text(p, restored, missing, notes):
+    if p.tidy:
+        lines = [
+            "This disk was tidied by TurboCAT " + VERSION + " on " + datetime.date.today().isoformat() + ".",
+            "It is NOT an original dump.",
+            "",
+            "Original: " + p.source_file,
+            "Every file was copied across unchanged into a fresh disk with a correct",
+            "directory: the errors in the original's directory are gone.",
+        ]
+        return "\n".join(lines + ([""] + notes if notes else [])) + "\n"
     lines = [
         "This disk was repaired by TurboCAT " + VERSION + " on " + datetime.date.today().isoformat() + ".",
         "It is NOT an original dump.",
@@ -495,9 +561,14 @@ def _log(log, p, path, sha, restored, missing=()):
         for x in restored:
             w.writerow([datetime.date.today().isoformat(), p.source_file, path, sha, x.path,
                         f"#{x.use.number:04d} {x.use.name}", x.use.sha1])
+        if p.tidy:                   # nothing replaced: one line saying what was done
+            w.writerow([datetime.date.today().isoformat(), p.source_file, path, sha,
+                        "(the disk's index)", TIDIED, ""])
         for x in missing:            # still damaged: "from" left empty
             w.writerow([datetime.date.today().isoformat(), p.source_file, path, sha, x.path, "", ""])
 
+
+TIDIED = "rebuilt by TurboCAT"         # the log's "from" for a tidied copy
 
 # What to tell the user when a repaired copy is still missing files
 FINISH_IT = ("To fix it fully, either:\n"

@@ -361,3 +361,110 @@ def platform_name():
         return info.get("PRETTY_NAME", "Linux")
     except Exception:
         return "Linux"
+
+
+# ---------------------------------------------------------------- hover notes for the Setup window
+
+def _rom_folders():
+    """Where Kickstart ROMs can go on this system, shortest list first."""
+    s = system()
+    if s == "windows":
+        return [r"C:\Users\Public\Documents\Amiga Files\Shared\rom (Amiga Forever)",
+                r"Documents\Amiga Files\Shared\rom"]
+    if s == "mac":
+        return ["~/Library/Application Support/Amiberry/Kickstarts (Amiberry)",
+                "~/Documents/FS-UAE/Kickstarts (FS-UAE)"]
+    return ["~/Amiberry/Kickstarts (Amiberry)",
+            "~/.var/app/com.blitterstudio.amiberry/data/amiberry/roms (Amiberry from Flathub)",
+            "~/Documents/FS-UAE/Kickstarts (FS-UAE)"]
+
+
+def _found_roms():
+    from . import emulator
+    home = os.path.expanduser("~")
+    dirs = sorted({d for d in emulator.EXTRA_ROM_DIRS if d})
+    return [d.replace(home, "~", 1) for d in dirs]
+
+
+def guide(name):
+    """The hover note for a feature or part in the Setup window: what it does, what to do, and
+    where any files go. "" if there's nothing more to say."""
+    s = system()
+    apt = s == "linux-apt"
+    install = (lambda pkg: f"Install it: sudo apt install {pkg}" if apt else
+               "It comes with TurboCAT on Windows and macOS." if s in ("windows", "mac") else
+               f"Install the {pkg} package with your system's package manager.")
+    roms = "\n".join("  • " + d for d in _rom_folders())
+    found = _found_roms()
+    found = ("\nTurboCAT found Kickstarts in:\n" + "\n".join("  • " + d for d in found)) if found else ""
+    notes = {
+        "Reading disk images": (
+            "What it does: reads ADF, ADZ, DMS, HDF and IPF disk images, and the ZIP, LHA and LZX "
+            "archives they come in, and lists every file on them.",
+            "What to do: Scan ▾ › Choose scan folders…, and tick the folders where you keep your disks.",
+            "Where files go: anywhere. TurboCAT only reads them; it never moves or changes them."),
+        "LHA archives": (
+            "What it does: opens LHA archives (WHDLoad games, Aminet and PD archives). Old ones from "
+            "1990–91 need the lha program as well.",
+            "What to do: " + install("lhasa") + " Then Rescan; archives it couldn't open are read again.",
+            ""),
+        "DMS disk images": (
+            "What it does: unpacks DMS images, so they can be read, played and copied to a Gotek.",
+            "What to do: " + install("xdms") + " Then Rescan.",
+            ""),
+        "Playing music": (
+            "What it does: plays Amiga music modules (ProTracker, MED, and others) found on your disks.",
+            "What to do: " + install("libopenmpt0") + " for the player.",
+            ""),
+        "Playing disks in an emulator": (
+            "What it does: Play starts a disk (or a whole set) in Amiberry or FS-UAE, on the right Amiga "
+            "with the right Kickstart.",
+            "What to do: install Amiberry (amiberry.com, or Flathub) or FS-UAE (fs-uae.net"
+            + (", or: sudo apt install fs-uae" if apt else "") + "), and add Kickstart ROMs: 1.3 for "
+            "the A500, 2.05 for the A600, 3.1 for the A1200. Amiga Forever (amigaforever.com) sells "
+            "them; or copy them from your own Amiga.",
+            "Where Kickstart files go: any folder you scan (TurboCAT recognises ROMs by their "
+            "contents, whatever they're called), or one of these:\n" + roms + found),
+        "TurboView": (
+            "What it does: starts an emulated A1200 running TurboView, the Amiga side of TurboCAT, with "
+            "your collection folders as drives.",
+            "What to do: needs an emulator and a Kickstart 3.x ROM (see Playing disks in an emulator).",
+            "Where files go: TurboView's own files are written to ~/Amiberry/HardDrives/TurboCAT if you "
+            "have an Amiberry folder, otherwise ~/TurboCAT-Amiga."),
+        "Copying to a Gotek stick": (
+            "What it does: copies disks to a USB stick for a Gotek floppy emulator, with their own names "
+            "or numbered DSKA0000.ADF, DSKA0001.ADF… (for FlashFloppy's numbered mode).",
+            "What to do: plug in a USB stick formatted FAT32; TurboCAT finds it once it's mounted.",
+            "Where files go: the top folder of the stick."),
+        "Repairing damaged disks": (
+            "What it does: rebuilds a damaged disk as a new image, putting back damaged files from copies "
+            "on your other disks. The original is never changed.",
+            "What to do: nothing to install. Choose a disk under Problems › Can be fixed.",
+            "Where files go: repaired copies in ~/TurboCAT/Repaired; a log of what came from where in "
+            "~/.local/share/turbocat/repairs.csv."),
+        "Proper names for disks": (
+            "What it does: finds each disk's proper TOSEC name from its checksum, however its file is "
+            "called.",
+            "What to do: Tools › Identify disks online… downloads TOSEC's lists once (about 100 MB), "
+            "and again every two months. Or put TOSEC .dat files beside your disks.",
+            "Where files go: the lists are kept in ~/.cache/turbocat/tosec. Your files aren't renamed "
+            "unless you choose Tools › Rename files to their proper names…"),
+        "Kickstart ROMs": (
+            "What it is: the Amiga's built-in software. Most disks need one to start.",
+            "What to do: Amiga Forever (amigaforever.com) sells them legally, or copy them from your own "
+            "Amiga. You want 1.3 (A500), 2.05 (A600) and 3.1 (A1200).",
+            "Where files go: any folder you scan, or one of these:\n" + roms + found),
+        "Amiga emulator": (
+            "What it is: the program that runs an Amiga on this computer, for Play and TurboView.",
+            "What to do: install Amiberry (amiberry.com, or Flathub: com.blitterstudio.amiberry) or "
+            "FS-UAE" + (" (sudo apt install fs-uae)" if apt else " (fs-uae.net)") + ". Both can be "
+            "installed; the Play window lets you choose.",
+            "Where files go: FS-UAE keeps its save states and disk changes in "
+            "~/.local/share/turbocat/fs-uae. Play gives emulators copies of your disks, so your "
+            "originals are never written to."),
+    }
+    aliases = {"amitools": "Reading disk images", "lhafile": "LHA archives", "lha (lhasa)": "LHA archives",
+               "xdms": "DMS disk images", "libopenmpt": "Playing music", "libxmp": "Playing music",
+               "Qt Multimedia": "Playing music", "List of Amiga disks": "Proper names for disks"}
+    parts = notes.get(name) or notes.get(aliases.get(name, ""))
+    return "\n\n".join(p for p in parts if p) if parts else ""

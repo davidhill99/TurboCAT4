@@ -5,8 +5,8 @@ SoundStudio, Oktalyzer, FastTracker 2, Scream Tracker 3, Impulse Tracker, AHX), 
 15-instrument Soundtracker modules, which have no signature, when the name says "mod.".
 
 Playback renders the module with libopenmpt (through ctypes) and the window plays the sound
-with Qt Multimedia. libopenmpt is usually already installed on Linux (VLC uses it); on Windows
-TurboCAT looks for libopenmpt.dll next to itself, on macOS for Homebrew's copy.
+with Qt Multimedia. TurboCAT's own copy in turbocat/lib is used first (libopenmpt 0.8+ plays
+OctaMED synth instruments); otherwise the system's (Linux; VLC uses it), or Homebrew's on macOS.
 AHX tunes are recognised but libopenmpt can't play them.
 """
 import ctypes
@@ -108,10 +108,13 @@ class _Lib:
     def get(cls):
         if cls.lib is None:
             here = os.path.dirname(os.path.abspath(__file__))
-            names = [ctypes.util.find_library("openmpt"),
-                     os.path.join(here, "lib", "libopenmpt.dll"), "libopenmpt.dll",
-                     "libopenmpt.so.0", "/opt/homebrew/lib/libopenmpt.dylib",
-                     "/usr/local/lib/libopenmpt.dylib", "libopenmpt.dylib"]
+            # TurboCAT's own copy first (turbocat/lib): libopenmpt 0.8 and later play OctaMED's
+            # synthesised and hybrid instruments, which the 0.7 that older Linux systems have can't.
+            mine = [os.path.join(here, "lib", n) for n in
+                    ("libopenmpt.so", "libopenmpt.dll", "libopenmpt.dylib")]
+            names = mine + [ctypes.util.find_library("openmpt"), "libopenmpt.dll",
+                            "libopenmpt.so.0", "/opt/homebrew/lib/libopenmpt.dylib",
+                            "/usr/local/lib/libopenmpt.dylib", "libopenmpt.dylib"]
             lib = None
             for name in filter(None, names):
                 try:

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TurboCAT 4
+Comment=Amiga disk cataloguer
+Path=/home/david/TurboCAT4
+Exec=/home/david/turbocat-env/bin/python -m turbocat window
+Icon=/home/david/TurboCAT4/turbocat/icons/mark.svg
+Terminal=false
+Categories=Utility;
+StartupWMClass=turbocat4

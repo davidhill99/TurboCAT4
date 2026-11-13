@@ -7,6 +7,30 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## Unreleased
 
+- Disks whose files all read but whose index (directory) has errors say so plainly ("The disk's
+  index has 2 small errors — every file still reads"), with the technical findings on hover, and
+  offer "Make a tidied copy…": the same files in a fresh disk with a correct index, checked file by
+  file, saved in ~/TurboCAT/Repaired as [f TurboCAT] and logged; the original isn't changed. A name
+  a broken index lists twice is kept once (or, if the two differ, the second as name.2)
+
+- Hover notes are easier to read: black on pale yellow with a thin black border whatever the desktop
+  theme, and long ones wrapped into a squarer box instead of one very wide line
+
+- Fixed: the panel lost TurboCAT's icon (showing a plain gear) once a tune started playing. TurboCAT
+  now runs as "turbocat4", so its windows' class matches its launcher (turbocat4.desktop), and its
+  icon is set for every window it opens
+
+- OctaMED songs with synthesised or hybrid instruments play properly: TurboCAT uses its own copy of
+  libopenmpt (0.8 or later, in turbocat/lib) before the system's. The libopenmpt 0.7 that Linux Mint
+  22 has left those instruments silent; libxmp stays as the fallback
+
+- Setup window: hovering over any feature or part explains what it does, what to do to get it
+  working, and where its files go (for Kickstart ROMs, the folders TurboCAT looks in, and where it
+  found yours)
+- A small round "i" now shows beside anything with a hover note (the details panel's notes and
+  facts, the Setup rows, the item count, the scan bar, the version in the status line), so it's
+  clear there's more to read. Buttons and menus keep their usual hover text without one
+
 - `dups`: standard AmigaDOS / Workbench commands (Assign, SetPatch, IconX, Execute and the other
   Workbench 1.3–3.x C: commands) count as common system files wherever they are on a disk, not
   only inside `C/`, so copies that games keep in their own root or drawers are grouped with the

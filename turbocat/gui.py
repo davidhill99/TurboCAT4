@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QButtonGroup, QHBoxLayout, QProgressBar,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QPushButton,
                                QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
-                               QTableView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
+                               QTableView, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
 from . import APP_NAME, VERSION
 from . import explain, madepics, readers, repair
@@ -389,14 +389,14 @@ def _link_repairs(items):
         return
     by_sha = {it.sha1: it for it in items if it.repaired}
     for it in items:
-        if it.status != "error" or it.repaired:
+        if it.status not in ("error", "warning") or it.repaired:
             continue
         made = [by_sha[sha] for sha in copies.get(it.file, []) if sha in by_sha]
         if not made:
             continue
         whole = [c for c in made if "[b]" not in c.file]
         it.repaired_copy = (whole or made)[-1].id
-        if whole and not it.good_copy:
+        if it.status == "error" and whole and not it.good_copy:   # a tidied copy isn't a "good copy"
             it.good_copy = whole[-1].id
 
 
@@ -1075,6 +1075,50 @@ def _wrap_label(text="", font=None, obj=None):
     return lab
 
 
+class HoverMark(QLabel):
+    """A small round "i" beside something that has a hover note, so you can see there's more to
+    read. It copies its target's hover text (and keeps up as it changes), and hides when there's none."""
+
+    def __init__(self, target=None):
+        super().__init__("i")
+        self.setObjectName("hoverMark")
+        self.setFixedSize(16, 16)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
+        f = ui_font(11, QFont.Weight.Bold)
+        f.setItalic(True)
+        self.setFont(f)
+        acc = C["accent"].name() if "accent" in C else "#3b67a2"
+        self.setStyleSheet(f"QLabel#hoverMark {{ color: {acc}; border: 1px solid {acc}; border-radius: 8px; "
+                           "background: transparent; padding: 0px; }" + TIP_STYLE)
+        self.target = target
+        if target is not None:
+            target.installEventFilter(self)
+            self._copy()
+
+    def _copy(self):
+        tip = self.target.toolTip()
+        self.setToolTip(tip)
+        self.setVisible(bool(tip.strip()))
+
+    def eventFilter(self, obj, event):
+        if obj is self.target and event.type() == QEvent.Type.ToolTipChange:
+            self._copy()
+        return False
+
+
+def with_mark(widget, spacing=6):
+    """The widget with a HoverMark after it, in a row of its own."""
+    box = QWidget()
+    h = QHBoxLayout(box)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(spacing)
+    h.addWidget(widget)
+    h.addWidget(HoverMark(widget), 0, Qt.AlignmentFlag.AlignVCenter)
+    h.addStretch(1)
+    return box
+
+
 class Note(QFrame):
     """A tinted note: icon, a heading and up to three detail lines."""
     MAX_LINES = 3
@@ -1118,6 +1162,8 @@ class Note(QFrame):
             body.addSpacing(4)
             body.addLayout(row)
         lay.addLayout(body, 1)
+        if tip:
+            lay.addWidget(HoverMark(self), 0, Qt.AlignmentFlag.AlignTop)
 
 
 class RepairDialog(QDialog):
@@ -1506,6 +1552,7 @@ class DetailsPanel(QFrame):
             val = _wrap_label("", ui_font(13, QFont.Weight.DemiBold))
             row.addWidget(pic, 0, Qt.AlignmentFlag.AlignTop)
             row.addWidget(val, 1)
+            row.addWidget(HoverMark(box), 0, Qt.AlignmentFlag.AlignTop)
             cell.addLayout(row)
             grid.addWidget(box, i // 2, i % 2)
             self.facts[name] = (pic, val)
@@ -1708,7 +1755,7 @@ class DetailsPanel(QFrame):
         self.fact_cells[name].setVisible(bool(text) and text != "—")
         pic, val = self.facts[name]
         val.setText(_breakable(text))
-        val.setStyleSheet(f"color: {color.name()};" if color else "")
+        val.setStyleSheet(f"QLabel {{ color: {color.name()}; }}" + TIP_STYLE if color else "")
         if ico:
             pic.setPixmap(icon(ico, 16))
             pic.show()
@@ -1780,7 +1827,7 @@ class DetailsPanel(QFrame):
             "accent", "duplicate",
             f"<b>{item.versions} versions of this disk</b> — this is the one shown; the others are "
             f"hidden while grouping is on. Nothing is deleted.<br>" + "<br>".join(lines) + more,
-            on_link=self._note_link, tip="Hover summary — how the others differ from this one:\n"
+            on_link=self._note_link, tip="How the others differ from this one:\n"
                                          + "\n".join(tips))
 
     def _set_note(self, item):
@@ -2208,10 +2255,24 @@ class DetailsPanel(QFrame):
                     f"install {_esc(pkg)}, then scan this folder again and TurboCAT will read "
                     "it properly. Help › Check setup shows how to install it."))
         if fs_issues:
+            n = len(fs_issues)
+            win = self.window()
+            mid = m["id"]
+            copy = self.cat.media_by_id(item.repaired_copy) if item.repaired_copy else None
+            tip = ("What TurboCAT found in the disk's index (its directory):\n"
+                   + "\n".join(w.split(FS_ISSUE, 1)[1] for w in fs_issues[:20])
+                   + "\n\nEvery file still reads, so nothing is lost. On an Amiga the disk may not "
+                     "find a file, or may say it is corrupt if something is saved to it. A tidied copy "
+                     "has the same files in a fresh, correct index; your original isn't changed.")
             self._add_note(Note(
                 "warn", "warning",
-                f"<b>Filesystem inconsistencies</b> ({len(fs_issues)}), but every file reads",
-                [w.split(FS_ISSUE, 1)[1] for w in fs_issues]))
+                f"<b>The disk's index has {n} small error{'s' if n != 1 else ''}</b> — every file "
+                "still reads" + (f". Tidied copy: <a href='{copy['number']}'>#{copy['number']:04d}</a>"
+                                 if copy is not None else ""),
+                on_link=lambda h: self.on_select_number(int(h)), tip=tip,
+                button=None if copy is not None else (
+                    "Make a tidied copy…",
+                    lambda: win.make_tidied_copy(mid) if hasattr(win, "make_tidied_copy") else None)))
         notes = []
         for r in [m] + kids:
             ri = _j(r["info"], {})
@@ -3415,7 +3476,7 @@ class ScanFoldersDialog(QDialog):
                            "leave it out. A half tick means some folders inside are left out.",
                            ui_font(13), "muted")
         note.setToolTip("Changing this never moves, changes or deletes your files.")
-        v.addWidget(note)
+        v.addWidget(with_mark(note))
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Folder", "In catalogue"])
@@ -3666,13 +3727,16 @@ class SetupDialog(QDialog):
         pic.setPixmap(icon(ico if f.important or f.status == setupcheck.OK else "warning", 18))
         pic.setFixedSize(18, 18)
         h.addWidget(pic, 0, Qt.AlignmentFlag.AlignTop)
-        text = _wrap_label(f"<b>{_esc(f.name)}</b> — {_esc(f.effect)}"
-                           + (" <i>(hover for more)</i>" if f.detail else ""), ui_font(13))
+        text = _wrap_label(f"<b>{_esc(f.name)}</b> — {_esc(f.effect)}", ui_font(13))
         text.setTextFormat(Qt.TextFormat.RichText)
         h.addWidget(text, 1)
         missing = [c.name for c in self.checks if c.name in f.needs and c.status != setupcheck.OK]
-        row.setToolTip((f.detail + "\n\n" if f.detail else "") + "Uses: " + ", ".join(f.needs) + (
-            "\nMissing: " + ", ".join(missing) + " (see below for how to get it)" if missing else ""))
+        guide = setupcheck.guide(f.name)
+        row.setToolTip("\n\n".join(x for x in (
+            f.detail, guide, "Uses: " + ", ".join(f.needs) + (
+                "\nMissing: " + ", ".join(missing) + " (see below for how to get it)" if missing else ""))
+            if x))
+        h.addWidget(HoverMark(row), 0, Qt.AlignmentFlag.AlignTop)
         return row
 
     def _row(self, c):
@@ -3728,6 +3792,10 @@ class SetupDialog(QDialog):
             if actions.count():
                 col.addLayout(actions)
         h.addLayout(col, 1)
+        guide = setupcheck.guide(c.name)
+        if guide:
+            box.setToolTip(guide)
+            h.addWidget(HoverMark(box), 0, Qt.AlignmentFlag.AlignTop)
         return box
 
 
@@ -4000,7 +4068,7 @@ class MainWindow(QMainWindow):
         self.counts.setObjectName("muted")
         self.counts.setFont(ui_font(13))
         words.addWidget(name)
-        words.addWidget(self.counts)
+        words.addWidget(with_mark(self.counts))
         hl.addWidget(mark)
         hl.addLayout(words)
         hl.addStretch(1)
@@ -4118,6 +4186,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self._stop_clicked)
         sb.addWidget(self.scan_busy)
         sb.addWidget(self.scan_text)
+        sb.addWidget(HoverMark(self.scan_bar), 0, Qt.AlignmentFlag.AlignVCenter)
         sb.addWidget(self.scan_file, 1)
         sb.addWidget(self.stop_btn)
         # A second row while one big file is read: how far into it, and how long it has left.
@@ -4347,6 +4416,7 @@ class MainWindow(QMainWindow):
         fl.addWidget(self.foot_left, 1)
         fl.addWidget(self.foot_stop, 0, Qt.AlignmentFlag.AlignVCenter)
         fl.addWidget(self.foot_right, 0)
+        fl.addWidget(HoverMark(self.foot_right), 0, Qt.AlignmentFlag.AlignVCenter)
         v.addWidget(foot)
 
         self.setCentralWidget(root)
@@ -4981,6 +5051,44 @@ class MainWindow(QMainWindow):
             f"{'s' if len(res.restored) != 1 else ''} put back"
             + (f", {len(res.missing)} still missing" if res.missing else "")
             + f" · in {repair.REPAIRED_DIR}")
+
+    def make_tidied_copy(self, media_id):
+        """For a disk whose files all read but whose index (directory) has errors: say what will be
+        done, ask, then write the same files to a fresh disk with a correct index."""
+        if self.worker is not None:
+            self.result_label.setText("Wait for the scan to finish, then try again.")
+            return
+        p = repair.tidy_plan(self.cat, media_id)
+        if p is None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Make a tidied copy")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"Make a tidied copy of #{p.number:04d}?")
+        box.setInformativeText(
+            f"TurboCAT copies all {p.total_files} files, unchanged, to a new disk with a fresh, correct "
+            f"index, and checks every file reads back the same.\n\nIt's saved as "
+            f"{repair.repaired_name(p.source_file, True)} in {repair.REPAIRED_DIR}, marked as made by "
+            "TurboCAT. Your original isn't changed.")
+        go = box.addButton("Make it", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(go)
+        box.exec()
+        if box.clickedButton() is not go:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            res = repair.build(self.cat, p)
+        except Exception as ex:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Make a tidied copy",
+                                f"The tidied copy wasn't made: {ex}\n\nNothing was written, and your "
+                                "original is unchanged.")
+            return
+        QApplication.restoreOverrideCursor()
+        self._start_scan([repair.REPAIRED_DIR], "Adding the tidied copy to the catalogue…")
+        self.result_label.setText(f"Made {os.path.basename(res.path)}: the same files, with a correct "
+                                  f"index · in {repair.REPAIRED_DIR}")
 
     def _save_missing(self, results):
         """Save the files the repaired copies still lack, as a spreadsheet to work from."""
@@ -6218,7 +6326,7 @@ class MainWindow(QMainWindow):
                                            margin: 2px; }}
             QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
             QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
-        """)
+                """ + TIP_STYLE)
 
 
 def _catalogue_ready(db_path):
@@ -6263,12 +6371,64 @@ def _catalogue_ready(db_path):
     return True
 
 
+# Hover notes: black on pale yellow with a thin black border, whatever the desktop theme, and long
+# ones wrapped into a narrower box instead of one very wide line.
+# A tooltip is a label created inside the widget being hovered, so it also picks up that part of
+# the window's rules (some make labels' backgrounds transparent, which a tooltip shows as black).
+# Qt names its tooltip label "qtooltip_label": aiming at that name, last, always wins.
+TIP_STYLE = ("QToolTip, QLabel#qtooltip_label { color: #000000; background-color: #ffffe1; "
+             "border: 1px solid #000000; padding: 6px; }")
+TIP_WIDTH = 380            # pixels a hover note wraps at
+TIP_WRAP_FROM = 50         # notes shorter than this stay on one line
+
+
+def _tip_html(text):
+    """A plain hover note as wrapped text in a box TIP_WIDTH wide (paragraphs and bullet lines kept)."""
+    body = "<br>".join(_esc(line) if line.strip() else "" for line in text.split("\n"))
+    return (f"<table width='{TIP_WIDTH}' cellspacing='0' cellpadding='0'><tr><td>"
+            f"<span style='color:#000000'>{body}</span></td></tr></table>")
+
+
+class TipFormatter(QObject):
+    """Shows every hover note in TurboCAT the same way: long plain notes wrapped to TIP_WIDTH.
+    Works for widgets and for rows in lists and trees."""
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.ToolTip or not isinstance(obj, QWidget):
+            return False
+        text = obj.toolTip()
+        if not text:
+            view = obj.parent()
+            if isinstance(view, QAbstractItemView) and obj is view.viewport():
+                idx = view.indexAt(event.pos())
+                text = idx.data(Qt.ItemDataRole.ToolTipRole) if idx.isValid() else ""
+        if not isinstance(text, str) or len(text) < TIP_WRAP_FROM or text.lstrip().startswith("<"):
+            return False                     # short or already formatted: Qt shows it as it is
+        QToolTip.showText(event.globalPos(), _tip_html(text), obj)
+        return True
+
+
+def style_tooltips(app):
+    pal = QToolTip.palette()
+    pal.setColor(pal.ColorRole.ToolTipBase, QColor("#ffffe1"))
+    pal.setColor(pal.ColorRole.ToolTipText, QColor("#000000"))
+    QToolTip.setPalette(pal)
+    app.setStyleSheet(app.styleSheet() + "\n" + TIP_STYLE)
+    app._tips = TipFormatter(app)
+    app.installEventFilter(app._tips)
+
+
 def run(db_path):
-    app = QApplication.instance() or QApplication(sys.argv[:1])
-    app.setApplicationName(APP_NAME)
+    # The windows' class is "turbocat4", the same as the launcher's file name (turbocat4.desktop):
+    # that is how the desktop's panel knows a window is TurboCAT and shows its icon, even after Qt
+    # opens a hidden window of its own (as its sound system does when a tune starts).
+    app = QApplication.instance() or QApplication(["turbocat4"])
+    app.setApplicationName("turbocat4")
+    app.setWindowIcon(QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons", "mark.svg")))
     app.setApplicationVersion(VERSION)
     _pick_theme()
     app.setFont(ui_font(14))
+    style_tooltips(app)
     if not _catalogue_ready(db_path):
         return 1
     w = MainWindow(db_path)

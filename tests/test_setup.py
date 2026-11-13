@@ -120,3 +120,17 @@ class BundledToolTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuideTest(unittest.TestCase):
+    """Every feature and part in the Setup window says what it does, what to do and where files go."""
+
+    def test_every_feature_has_a_guide(self):
+        from turbocat import setup
+        for name in ("Reading disk images", "LHA archives", "DMS disk images", "Playing music",
+                     "Playing disks in an emulator", "TurboView", "Copying to a Gotek stick",
+                     "Repairing damaged disks", "Proper names for disks", "Kickstart ROMs",
+                     "Amiga emulator", "xdms", "lha (lhasa)", "List of Amiga disks"):
+            g = setup.guide(name)
+            self.assertIn("What to do", g, name)
+        self.assertIn("Kickstarts", setup.guide("Kickstart ROMs"))      # where the ROM files go

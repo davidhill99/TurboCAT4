@@ -1,2 +1,4 @@
 __pycache__/
 *.db
+# libraries built or bundled for this computer (see STATUS / packaging)
+turbocat/lib/*.so*
