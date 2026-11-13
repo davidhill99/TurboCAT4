@@ -239,23 +239,54 @@ def identify(rows_by_top, lists=()):
     dats = [l for l in lists if l.kind == "dat"]
     out = {}
     for top, rows in rows_by_top.items():
+        found = []
         for r in rows:
             sha = (r["sha1"] or "").lower()
             if not sha:
                 continue
             for lst in dats:
                 if sha in lst.by_sha1:
-                    out[top] = (lst.by_sha1[sha], lst.title, lst.title)
+                    found.append((lst.by_sha1[sha], lst.title, lst.title))
                     break
             else:
                 if sha in tosec:
                     name, which = tosec[sha]
-                    out[top] = (name, f"TOSEC's {which} list", which)
+                    found.append((name, f"TOSEC's {which} list", which))
                 elif sha in known:
-                    out[top] = (known[sha], LIST_TITLE, "Games")
-            if top in out:
-                break
+                    found.append((known[sha], LIST_TITLE, "Games"))
+            if found and r is rows[0]:
+                break                    # the item itself is known: that's its name
+        if found:
+            out[top] = (several_disks(found[0][0], [f[0] for f in found]),) + found[0][1:]
     return out
+
+
+def several_disks(first, names):
+    """The name for an archive holding several disks of one set: an archive with "(Disk 1 of 3)",
+    "(Disk 2 of 3)" and "(Disk 3 of 3)" inside is the whole set, not disk 1, so the disk number
+    comes out of its name ("Walker (1993)(Psygnosis)"), or says which disks it holds when it isn't
+    all of them ("(Disks 1, 2 of 3)"). Anything else keeps the first name found.
+
+    One disk can match another release of the same game: Pinball Fantasies' disk 1 is the same as
+    the four-disk release's, while its disks 2 and 3 say "of 3". So the total is the one most of
+    the disks agree on (ties: the one their number fits), and the name comes from that release."""
+    from collections import Counter
+    from . import sets
+    named = [(n, sets.parse(n)) for n in dict.fromkeys(names)]
+    named = [(n, p) for n, p in named if p]
+    if len(named) < 2 or len({p[0] for _, p in named}) != 1:
+        return first                      # one disk, or disks of different games
+    numbers = {p[1] for _, p in named}
+    votes = Counter(p[2] for _, p in named)
+    total = max(votes, key=lambda t: (votes[t], t == len(numbers), -t))
+    have = sorted(n for n in numbers if n <= total)
+    base = next(n for n, p in named if p[2] == total)
+    m = sets._DISK.search(base)
+    if m is None:
+        return first
+    tag = "" if have == list(range(1, total + 1)) else \
+        f"(Disks {', '.join(map(str, have))} of {total})"
+    return (base[:m.start()] + tag + base[m.end():]).replace("  ", " ")
 
 
 def stem(name):

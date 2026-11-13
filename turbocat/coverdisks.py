@@ -10,6 +10,7 @@ folder names: the magazine's name, the issue number and the disk number or label
     ".../Amiga Shopper Coverdisks/Issue 47 March 1995/Amiga Shopper Issue 47 Disk 2.adf"
 Files are never renamed here.
 """
+import functools
 import os
 import re
 from dataclasses import dataclass
@@ -109,6 +110,7 @@ GENERIC = {"disk", "disc", "dsk", "the", "of", "and", "amiga", "issue", "volume"
            "coverdisk", "magazine"}
 
 
+@functools.lru_cache(maxsize=None)
 def _key(text):
     return " ".join(_words(text))
 
@@ -131,6 +133,13 @@ class Catalogue:
         self._mags = sorted(self.magazines, key=len, reverse=True)
 
     def magazine_in(self, text):
+        memo = self.__dict__.setdefault("_memo", {})        # the same names come up every reload
+        if text in memo:
+            return memo[text]
+        memo[text] = found = self._magazine_in(text)
+        return found
+
+    def _magazine_in(self, text):
         k = " " + _key(text) + " "
         for mag in self._mags:
             if f" {mag} " in k:

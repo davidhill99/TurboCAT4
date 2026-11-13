@@ -2,7 +2,8 @@
 
 TurboCAT picks a sensible Amiga for the disk (an A1200 for AGA titles, otherwise an A500), finds a
 matching Kickstart ROM by its contents (Amiga Forever's encrypted ROMs work when rom.key is beside
-them), puts the first disks in DF0:/DF1: and the rest in the emulator's disk swapper.
+them), puts a set's disks in DF0: to DF3: (an Amiga's four drives), and more than four in the
+emulator's disk swapper too.
 Disks the emulators can't open directly (one of several ADFs in an archive, an ADF inside an
 LHA) are unpacked to ~/.cache/turbocat/play first.
 """
@@ -331,7 +332,10 @@ def disk_files(cat, top_ids, whole_sets=True):
         for d in p.disks:
             m = cat.media_by_id(d.media_id)
             if m["parent_id"] is None and m["kind"] in ("adf", "adz", "dms"):
-                files.append(m["source"])          # the emulators read these as they are
+                # A copy: a game that saves to its disk (high scores, settings) changes the copy,
+                # never the original. The copy is kept, so saves are there the next time.
+                with open(m["source"], "rb") as f:
+                    files.append(_cached(os.path.basename(m["source"]), f.read()))
             elif m["parent_id"] == top["id"] and top["kind"] == "zip" and len(p.disks) == 1:
                 files.append(top["source"])        # a ZIP holding one disk: also read directly
             else:
@@ -431,6 +435,15 @@ def display_args(emulator, display):
         return ["--fullscreen=1", "--fullscreen_mode=fullscreen-window", "--keep_aspect=1"]
     return []
 
+DRIVES = 4          # DF0: to DF3:, as many as an Amiga can have
+# FS-UAE keeps its own files (save states, disk overlays, logs) here, not in ~/Documents/FS-UAE
+FSUAE_DIR = os.path.expanduser("~/.local/share/turbocat/fs-uae")
+# A plain A1200 has 2 MB of Chip RAM and no Fast RAM; most owners added a trapdoor expansion, and
+# some AGA games crash on 2 MB alone (Worms - The Director's Cut: "Software Failure"). So TurboCAT's
+# A1200 has 8 MB of Fast RAM, the most a 68020 A1200 trapdoor card gave.
+A1200_FAST_MB = 8
+
+
 def command(emulator, base, model, rom, files, whdload=None, mounts=(), display="window",
             fast_floppy=False):
     """The command line that starts `emulator` with these disks. mounts: [(volume, folder)].
@@ -441,22 +454,32 @@ def command(emulator, base, model, rom, files, whdload=None, mounts=(), display=
         if rom:
             cmd += ["-r", rom]
         cmd += display_args(emulator, display)
+        if model == "A1200":
+            cmd += ["-s", f"fastmem_size={A1200_FAST_MB}"]
         if whdload:
             return cmd + ["--autoload", whdload]
-        for i, f in enumerate(files[:2]):
+        # An Amiga takes up to four floppy drives: a set of 2-4 disks goes in DF0:-DF3:, so a game
+        # asking for disk 3 finds it in a drive; more than four are in the disk swapper as well.
+        for i, f in enumerate(files[:DRIVES]):
             cmd += [f"-{i}", f]
+        for i in range(1, min(len(files), DRIVES)):
+            cmd += ["-s", f"floppy{i}type=0"]              # a 3.5" DD drive for each disk
         if len(files) > 1:
-            cmd += ["-s", "floppy1type=0"]                 # a second drive, DF1:, for the second disk
             cmd.append("-diskswapper=" + ",".join(f'"{f}"' if "," in f else f for f in files))
         for vol, folder in mounts:
             cmd += ["-s", f"filesystem2=rw,{vol}:{vol}:{folder},-128"]
         if fast_floppy:
             cmd += ["-s", "floppy_speed=800"]
         return cmd
-    cmd = list(base) + [f"--amiga_model={model}"] + display_args(emulator, display)
+    os.makedirs(FSUAE_DIR, exist_ok=True)
+    cmd = list(base) + [f"--base_dir={FSUAE_DIR}", f"--amiga_model={model}"] + display_args(emulator, display)
     if rom:
         cmd.append(f"--kickstart_file={rom}")
-    for i, f in enumerate(files[:2]):
+    if model == "A1200":
+        cmd.append(f"--fast_memory={A1200_FAST_MB * 1024}")
+    if len(files) > 1:
+        cmd.append(f"--floppy_drive_count={min(len(files), DRIVES)}")
+    for i, f in enumerate(files[:DRIVES]):
         cmd.append(f"--floppy_drive_{i}={f}")
     for i, f in enumerate(files):
         cmd.append(f"--floppy_image_{i}={f}")
@@ -485,7 +508,8 @@ def turboview_command(emulator, base, rom, folder, roots, display="window"):
         for i, (path, vol) in enumerate(roots, 1):
             cmd += ["-s", f"filesystem2=ro,DH{i}:{vol}:{path},-128"]
         return cmd
-    cmd = list(base) + ["--amiga_model=A1200", "--floppy_drive_count=2", "--fast_memory=8192",
+    os.makedirs(FSUAE_DIR, exist_ok=True)
+    cmd = list(base) + [f"--base_dir={FSUAE_DIR}", "--amiga_model=A1200", "--floppy_drive_count=2", "--fast_memory=8192",
                         "--uae_cpu_speed=max", "--uae_gfx_resolution=superhires",
                         f"--hard_drive_0={folder}", "--hard_drive_0_label=TurboCAT"] + display_args(emulator, display)
     if rom:

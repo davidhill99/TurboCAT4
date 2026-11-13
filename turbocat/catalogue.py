@@ -226,6 +226,9 @@ class Catalogue:
         return (r or 0) + 1
 
     def add_media(self, rec: dict, parent_id=None, number=None):
+        from .readers import amiga_text as t      # names that aren't valid UTF-8 can't be stored as text
+        rec = {k: t(v) for k, v in rec.items()}
+        rec["files"] = [{k: t(v) for k, v in f.items()} for f in rec.get("files", [])]
         cur = self.db.execute(
             """INSERT INTO media (number,parent_id,source,inner_path,kind,size,mtime,sha1,volume,fs,
                boot_kind,boot_flags,status,problems,warnings,text,info,whd_name,whd_copy,whd_info,
@@ -413,6 +416,27 @@ class Catalogue:
             self.db.execute("DELETE FROM media WHERE id=?", (i,))
         self.db.commit()
         return len(ids)
+
+    def not_amiga_items(self):
+        """Top-level zips that turn out not to be Amiga at all (an Office document, a zip of
+        PDFs), going by the files listed in them: [(id, source, why)]."""
+        from . import readers
+        names = {}
+        for r in self.db.execute("SELECT f.media_id, f.path, f.is_dir FROM files f JOIN media m "
+                                 "ON m.id=f.media_id WHERE m.parent_id IS NULL AND m.kind='zip'"):
+            names.setdefault(r["media_id"], []).append(r["path"] + ("/" if r["is_dir"] else ""))
+        with_inner = {r[0] for r in self.db.execute(
+            "SELECT DISTINCT parent_id FROM media WHERE parent_id IS NOT NULL")}
+        out = []
+        for r in self.db.execute("SELECT id, source FROM media WHERE parent_id IS NULL AND kind='zip'"):
+            if r["id"] in with_inner:
+                continue                 # it holds disks, archives or tunes: Amiga
+            ext = os.path.splitext(r["source"])[1].lower()
+            why = "an Office document" if ext in readers.OFFICE_EXTS else \
+                readers.not_amiga(names.get(r["id"], []))
+            if why:
+                out.append((r["id"], r["source"], why))
+        return out
 
     def remove_missing(self, roots):
         """Drop items whose file has gone, but only under roots that still exist

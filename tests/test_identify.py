@@ -46,6 +46,26 @@ class IdentifyTest(unittest.TestCase):
         self.assertEqual(found[7][0], "Superfrog (1993)(Team 17)(Disk 1 of 4)[cr CSL].adf")
         self.assertEqual(identify.identify({8: [{"sha1": "1" * 40}]}), {})
 
+    def test_an_archive_holding_a_whole_set_is_named_for_the_set(self):
+        """Walker in one zip, disks A, B and C: it is the whole game, not disk 1 of 3."""
+        names = [f"Walker (1993)(Psygnosis)(Disk {n} of 3)[cr FLT].adf" for n in (1, 2, 3)]
+        self.assertEqual(identify.several_disks(names[0], names), "Walker (1993)(Psygnosis)[cr FLT].adf")
+        self.assertEqual(identify.several_disks(names[0], names[:2]),
+                         "Walker (1993)(Psygnosis)(Disks 1, 2 of 3)[cr FLT].adf")
+        self.assertEqual(identify.several_disks(names[0], names[:1]), names[0])
+        other = "Lemmings (1991)(Psygnosis)(Disk 2 of 2).adf"
+        self.assertEqual(identify.several_disks(names[0], [names[0], other]), names[0])
+        from turbocat import sets
+        self.assertIsNone(sets.parse("Walker (1993)(Psygnosis)[cr FLT].adf"))   # so not a set's disk
+
+    def test_a_disk_shared_with_another_release_doesnt_split_the_set(self):
+        """Pinball Fantasies: disk A matches the 4-disk release's disk 1, B and C say "of 3"."""
+        names = ["Pinball Fantasies (1992)(21st Century)(Disk 1 of 4)[cr SR].adf",
+                 "Pinball Fantasies (1992)(21st Century)(Disk 2 of 3)[cr SP].adf",
+                 "Pinball Fantasies (1992)(21st Century)(Disk 3 of 3)[cr SP].adf"]
+        self.assertEqual(identify.several_disks(names[0], names),
+                         "Pinball Fantasies (1992)(21st Century)[cr SP].adf")
+
     def test_guesses_only_for_names_that_say_nothing(self):
         self.assertEqual(identify.guess("/a/Superfrog/Disk1.adf"), "Superfrog")
         self.assertEqual(identify.guess("/a/Amiga/Disk1.adf"), "")            # the folder says nothing

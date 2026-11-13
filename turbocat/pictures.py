@@ -9,6 +9,7 @@
 Pictures are saved as PNG files in ~/.cache/turbocat/pictures and listed in the catalogue's
 `thumbs` table, keyed by the item's SHA1 so a rescan of an unchanged file keeps them.
 """
+import functools
 import hashlib
 import json
 import os
@@ -71,6 +72,11 @@ def ensure_schema(cat):
     if "artist" not in cols:
         cat.db.execute("ALTER TABLE music ADD COLUMN artist TEXT")
         cat.db.execute("ALTER TABLE music ADD COLUMN info_v INTEGER DEFAULT 0")
+    tcols = {r[1] for r in cat.db.execute("PRAGMA table_info(thumbs)")}
+    if "made" not in tcols:             # pictures TurboCAT draws itself (madepics.py)
+        cat.db.execute("ALTER TABLE thumbs ADD COLUMN made TEXT")
+        cat.db.execute("ALTER TABLE thumbs ADD COLUMN made_from TEXT")
+        cat.db.execute("ALTER TABLE thumbs ADD COLUMN made_v INTEGER DEFAULT 0")
 
 
 MUSIC_INFO_V = 1       # bump to read every tune's song name and artist again
@@ -475,12 +481,33 @@ def build(cat, progress=None, stop=lambda: False):
 
 # ---------------------------------------------------------------- online
 
+@functools.lru_cache(maxsize=None)
 def normal(title):
     t = title.lower().replace("&", " and ")
     t = re.sub(r"^(the|a|an)\s+(.*)$", r"\2 \1", t.strip())
     return re.sub(r"[^a-z0-9]", "", t)
 
 
+_JUNK_PREFIX = re.compile(r"^(zzz-unk-|zzz-)", re.I)
+_EXTRA_WORDS = re.compile(r"(\s*-\s*|\s+)(hd install(er)?|trainer\b.*|cd32|aga|ecs|ocs|1mb|512k|"
+                          r"preview|budget|re-?release)\s*$", re.I)
+
+
+@functools.lru_cache(maxsize=None)
+def loose(title):
+    """A looser key for matching names that differ only in small words: no 'the/a/an', no
+    version number at the end, no edition words ('Dune II - The Battle for Arrakis' and
+    'Dune II - Battle for Arrakis'; 'Millennium 2.2' and 'Millennium')."""
+    t = _JUNK_PREFIX.sub("", title.strip())
+    for _ in range(3):
+        t = _EXTRA_WORDS.sub("", t)
+    t = re.sub(r"\s+v?[0-9]+(\.[0-9]+)+[a-z]?\s*$", "", t, flags=re.I)
+    t = t.lower().replace("&", " and ")
+    t = re.sub(r"\b(the|a|an)\b", " ", t)
+    return re.sub(r"[^a-z0-9]", "", t)
+
+
+@functools.lru_cache(maxsize=None)
 def clean_title(name):
     """'Lemmings 2 - The Tribes (1993)(Psygnosis)[cr].zip' -> 'Lemmings 2 - The Tribes'."""
     base = os.path.basename(name.rstrip("/"))
@@ -494,6 +521,7 @@ def clean_title(name):
     base = re.sub(r"\s+(demo[- ]?(playable|rolling)?|(19|20)[0-9x]{2})\b.*$", "", base, flags=re.I)
     base = re.sub(r"[\s\-]*\b(disk|disc)\s*([0-9]+|[a-d])(\s*of\s*[0-9]+)?\s*$", "", base, flags=re.I)
     base = re.sub(r"\s+v?[0-9]+(\.[0-9]+)+[a-z]?\s*$", "", base, flags=re.I)   # versions
+    base = _JUNK_PREFIX.sub("", base)                                          # "ZZZ-UNK-Ishar 3"
     return " ".join(base.split()).strip(" -")
 
 
@@ -538,13 +566,20 @@ def online_index(stop=lambda: False):
         if folder not in LR_ORDER:
             continue
         title = re.split(r"\s*\(", fname[:-4], maxsplit=1)[0]
-        slot = index.setdefault(normal(title), {})
-        # Prefer the entry without a region, then Europe, then whatever came first.
-        old = slot.get(folder)
-        if old is None or ("(" not in fname and "(" in old) or \
-                ("(Europe)" in fname and "(Europe)" not in old and "(" in old):
-            slot[folder] = p
+        _add(index, normal(title), folder, fname, p)
+        _add(index, "~" + loose(title), folder, fname, p)     # the looser key, tried second
     return index
+
+
+def _add(index, key, folder, fname, p):
+    if key in ("", "~"):
+        return
+    slot = index.setdefault(key, {})
+    # Prefer the entry without a region, then Europe, then whatever came first.
+    old = slot.get(folder)
+    if old is None or ("(" not in fname and "(" in old) or \
+            ("(Europe)" in fname and "(Europe)" not in old and "(" in old):
+        slot[folder] = p
 
 
 def item_titles(cat, m):
@@ -565,6 +600,9 @@ def item_titles(cat, m):
     return out
 
 
+ONLINE_RULES = 2     # bump when the matching improves, so disks not found before are tried again
+
+
 def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=None):
     """For items without a picture of their own, fetch one from libretro-thumbnails.
     known: {top id: proper name} for disks identified by checksum: their real titles are tried
@@ -578,14 +616,15 @@ def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=Non
     except Stopped:
         return {"looked": 0, "found": 0, "stopped": True}
     thumbs = thumbs_by_key(cat)
+    retry = cat.get_meta("online_rules", 1) < ONLINE_RULES      # better matching since last time
     todo = []
     for m in cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number"):
         t = thumbs.get(item_key(m))
         if t is not None and t["pic"]:
             continue
-        if t is not None and t["online"] and not force and m["id"] not in known:
+        if t is not None and t["online"] and not (force or retry) and m["id"] not in known:
             continue
-        if m["status"] == "empty" or m["kind"] in ("hdf", "folder"):
+        if m["status"] == "empty" or m["kind"] in ("hdf", "folder", "module", "kickstart"):
             continue
         todo.append(m)
     got = looked = 0
@@ -603,10 +642,10 @@ def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=Non
         titles = item_titles(cat, m)
         if m["id"] in known:
             titles = [clean_title(known[m["id"]])] + titles
-        for name in titles:
-            slot = index.get(normal(name))
+        for key in [normal(n) for n in titles] + ["~" + loose(n) for n in titles]:
+            slot = index.get(key)
             if slot:
-                match = (name, next(slot[f] for f in LR_ORDER if f in slot))
+                match = (titles[0], next(slot[f] for f in LR_ORDER if f in slot))
                 break
         if match:
             url = LR_RAW + urllib.parse.quote(match[1])
@@ -634,6 +673,8 @@ def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=Non
         if i % 20 == 19:
             cat.db.commit()
     cat.db.commit()
+    if retry and not stopped:
+        cat.set_meta("online_rules", ONLINE_RULES)
     if progress:
         progress(len(todo), len(todo), None)
     return {"looked": looked, "found": got, "stopped": stopped}

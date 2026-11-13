@@ -28,6 +28,31 @@ class WorkbenchTest(unittest.TestCase):
         cmd = emulator.command("fs-uae", ["fs-uae"], "A1200", None, ["wb.adf", "c.adf"], fast_floppy=True)
         self.assertIn("--floppy_drive_speed=0", cmd)
 
+    def test_a_set_of_three_goes_in_three_drives(self):
+        """Worms - The Director's Cut asks for disk 3: it has to be in a drive, not only the swapper."""
+        disks = ["d1.adf", "d2.adf", "d3.adf"]
+        cmd = emulator.command("amiberry", ["amiberry"], "A1200", None, disks)
+        self.assertEqual([cmd[cmd.index(f"-{i}") + 1] for i in range(3)], disks)
+        self.assertIn("floppy2type=0", cmd)
+        self.assertNotIn("-3", cmd)
+        cmd = emulator.command("fs-uae", ["fs-uae"], "A1200", None, disks)
+        self.assertIn("--floppy_drive_count=3", cmd)
+        self.assertIn("--floppy_drive_2=d3.adf", cmd)
+
+    def test_an_a1200_has_fast_ram(self):
+        """Worms - The Director's Cut crashes with Software Failure on a plain 2 MB A1200."""
+        cmd = emulator.command("amiberry", ["amiberry"], "A1200", None, ["d1.adf"])
+        self.assertIn("fastmem_size=8", cmd)
+        self.assertIn("--fast_memory=8192", emulator.command("fs-uae", ["fs-uae"], "A1200", None, ["d1.adf"]))
+        self.assertNotIn("fastmem_size=8", emulator.command("amiberry", ["amiberry"], "A500", None, ["d.adf"]))
+
+    def test_more_than_four_disks_fill_four_drives_and_the_swapper(self):
+        disks = [f"d{n}.adf" for n in range(1, 7)]
+        cmd = emulator.command("amiberry", ["amiberry"], "A500", None, disks)
+        self.assertEqual(cmd[cmd.index("-3") + 1], "d4.adf")
+        self.assertNotIn("-4", cmd)
+        self.assertTrue(any(c.startswith("-diskswapper=") and "d6.adf" in c for c in cmd))
+
 
 if __name__ == "__main__":
     unittest.main()

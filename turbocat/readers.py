@@ -49,6 +49,65 @@ class ContainerResult:
 
 # ---------------------------------------------------------------- detection
 
+# Zip files that aren't Amiga at all. Word, Excel and LibreOffice documents, e-books and Java
+# programs are zips inside, and a scan of a whole Dropbox or home folder finds plenty.
+OFFICE_EXTS = {".docx", ".docm", ".dotx", ".xlsx", ".xlsm", ".xltx", ".pptx", ".pptm", ".potx",
+               ".vsdx", ".odt", ".ods", ".odp", ".odg", ".ott", ".epub", ".jar", ".apk", ".xpi",
+               ".3mf", ".kmz", ".numbers", ".pages", ".key"}
+# Files that, on their own in a zip, mean it's from a PC or another computer, not an Amiga
+PC_FILES = {".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods",
+            ".rtf", ".csv", ".htm", ".html", ".json", ".vcf", ".eml", ".msg",
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".heic", ".webp", ".tif", ".tiff", ".svg",
+            ".mp3", ".mp4", ".m4a", ".mov", ".avi", ".mkv", ".wav", ".opus", ".ogg", ".flac"}
+OTHER_ROMS = {".gb", ".gbc", ".gba", ".nes", ".fds", ".sfc", ".smc", ".md", ".gen", ".smd", ".sms",
+              ".gg", ".32x", ".n64", ".z64", ".v64", ".nds", ".3ds", ".a26", ".a52", ".a78", ".pce",
+              ".lnx", ".ngp", ".ngc", ".ws", ".wsc", ".vb", ".col", ".int", ".vec",
+              ".d64", ".t64", ".prg", ".crt", ".tap", ".tzx", ".z80", ".sna", ".st", ".msa", ".stx",
+              ".atr", ".xex", ".cdt", ".cpc"}
+
+
+SYSTEM_JUNK = {".dropbox", ".dropbox.attr", ".ds_store", "thumbs.db", "desktop.ini", ".localized"}
+
+
+def not_amiga(names):
+    """Why a zip, going by the names of the files in it, isn't Amiga ('an Office document'), or
+    None if it might be. Amiga zips (disk images, archives, programs, ROMs, music) are kept: only
+    documents, e-books, Java programs and zips holding nothing but PC files or other computers'
+    games are left out."""
+    files = [n.replace("\\", "/") for n in names if n and not n.endswith("/")]
+    # markers PCs and cloud drives leave in folders say nothing about what the zip is
+    files = [n for n in files if os.path.basename(n).lower() not in SYSTEM_JUNK
+             and not n.lower().startswith("__macosx/")]
+    low = {n.lower() for n in files}
+    if "[content_types].xml" in low:
+        return "an Office document"
+    if "mimetype" in low:
+        return "a LibreOffice document or e-book"
+    if "meta-inf/manifest.mf" in low and any(n.endswith((".class", ".dex")) for n in low):
+        return "a Java or Android program"
+    if not files:
+        return None
+    exts = {os.path.splitext(n)[1] for n in low}
+    if exts <= OTHER_ROMS:
+        return "a game for another computer or console"
+    if exts <= PC_FILES | OTHER_ROMS:
+        return "PC documents, pictures or media"
+    return None
+
+
+def zip_not_amiga(path):
+    """not_amiga() for a zip file on disk, reading only its list of files (quick, even for a big
+    zip). None if it might be Amiga or can't be read."""
+    import zipfile
+    if os.path.splitext(path)[1].lower() in OFFICE_EXTS:
+        return "an Office document"
+    try:
+        with zipfile.ZipFile(path) as z:
+            return not_amiga(z.namelist())
+    except Exception:
+        return None
+
+
 def detect(name: str, head: bytes, size: int) -> Optional[str]:
     """Identify a file by its content (and size/extension as a fallback)."""
     ext = os.path.splitext(name)[1].lower()
@@ -358,6 +417,22 @@ def local_fixes(messages):
     return out
 
 
+def amiga_text(s):
+    """A name read back from this computer's disk that isn't valid UTF-8 (an Amiga name in Latin-1,
+    like "Français", unpacked by lha) as proper text. Valid names are left as they are."""
+    if not isinstance(s, str):
+        return s
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        raw = s.encode("utf-8", "surrogateescape")
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("latin-1")
+
+
 def _lha_with_tool(data):
     """Open an LHA archive with 7-Zip or lha, for the old ones lhafile can't read (the -lh1- method
     of 1990-91, header variants). Returns a list of FileEntry, or None if no tool could."""
@@ -379,7 +454,7 @@ def _lha_with_tool(data):
             for folder, dirs, files in os.walk(out):
                 for name in sorted(dirs) + sorted(files):
                     full = os.path.join(folder, name)
-                    rel = os.path.relpath(full, out).replace(os.sep, "/")
+                    rel = amiga_text(os.path.relpath(full, out).replace(os.sep, "/"))
                     if os.path.islink(full):
                         continue
                     st = os.stat(full)

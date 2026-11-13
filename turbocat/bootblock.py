@@ -127,8 +127,19 @@ def readable_strings(data: bytes, min_len: int = 6, limit: int = 40):
     return [out[i] for i in sorted(ranked)]
 
 
+_best = {}
+
+
 def best_title(strings):
-    """Pick the string most likely to be a title or credit (for non-DOS disks)."""
+    """Pick the string most likely to be a title or credit (for non-DOS disks). Remembered: the
+    same disks' texts come up on every reload."""
+    key = tuple(strings)
+    if key not in _best:
+        _best[key] = _best_title(key)
+    return _best[key]
+
+
+def _best_title(strings):
     best, score = "", 0.0
     for s in strings:
         if s.lower().endswith((".library", ".device")) or s.lstrip().startswith(";") \

@@ -7,6 +7,7 @@ Like games.py, each rule gives a reason shown to the user. An item is a utility 
   * or its name says so: a copier, tracker, editor, paint program, virus killer, assembler...
 Games always stay games, and disks of modules or samples are music, not utilities.
 """
+import functools
 import os
 import re
 
@@ -60,3 +61,40 @@ def classify(cat, rows, game_why, lists, roots):
         if word:
             out[m["id"]] = f"the name says so (“{word.group(0)}”)"
     return out
+
+
+# What kind of utility it is, for the picture shown when it has none of its own. First match wins.
+CATEGORIES = [
+    ("virus", "Virus killer", "problem",
+     r"virus|v-?kill|killer|bootx|vchk|virusz|anti-?virus"),
+    ("music", "Music tools", "music",
+     r"tracker|composer|sequencer|sampler|synth|sound|music|midi|med\b|octamed"),
+    ("pack", "Packers and archivers", "archive",
+     r"crunch|packer|unpack|archiv|\blha\b|\blzx\b|ripper|imploder|powerpack|xpk"),
+    ("disk", "Disk tools", "disk",
+     r"cop(y|ier)|backup|format|salv|doctor|repair|disk ?(master|tool|edit|mon|opti|fix|zap|check)|"
+     r"\bdms\b|optimi[sz]"),
+    ("graphics", "Graphics", "magazine",
+     r"paint|draw|sketch|anim|viewer|picture|gfx|graphic|font|icon|clip ?art|ray ?trac|render|\b3d\b|image"),
+    ("code", "Programming", "chip",
+     r"assembl|compiler|devpac|seka|amos|blitz|basic|debug|monitor|disassembl|source|coding|\basm\b|"
+     r"programming|\bc\b compiler|e compiler"),
+    ("office", "Office and comms", "folder",
+     r"word ?pro|wordworth|text|editor|database|spreadsheet|calc|terminal|modem|comms|\bbbs\b|printer|"
+     r"publish|\bdtp\b|letter"),
+    ("system", "System tools", "tool",
+     r"workbench|kickstart|patch|install|speed|accelerat|boot|sysinfo|benchmark|emulat|degrader|"
+     r"relokick|setpatch|system|diagnos|memory|mem"),
+]
+_CAT_RE = [(k, label, ico, re.compile(rx, re.I)) for k, label, ico, rx in CATEGORIES]
+GENERAL = ("general", "Utility disk", "tool")
+
+
+@functools.lru_cache(maxsize=None)
+def category(*texts):
+    """(key, label, icon name) for a utility, from its name, its folder and why it counts as one."""
+    text = " ".join(t for t in texts if t)
+    for key, label, ico, rx in _CAT_RE:
+        if rx.search(text):
+            return key, label, ico
+    return GENERAL

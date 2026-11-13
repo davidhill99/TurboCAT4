@@ -87,6 +87,84 @@ What changed in each release, newest first. Work not yet in a numbered release i
   still be ticked). Each folder shows how many catalogue items came from it. On Save, if unticked
   folders hold catalogued items, TurboCAT asks whether to keep them or take them out; files on disk
   are never touched. Drives and network shares that are plugged in are listed too
+- Files that aren't Amiga are left out of the catalogue: Word, Excel and LibreOffice documents (they
+  are zips inside), e-books, Java programs, and zips holding only PC documents, pictures, chats or
+  other computers' games (a Game Boy ROM). Amiga zips with no disk image inside (demo programs, IPF
+  disks, firmware ROMs) stay. Ones catalogued before go on the next Rescan, and the scan says how
+  many were left out
+- A music module or ROM on its own is no longer counted as a game because of its name
+- The list is easier to read: each disk's title is shown on its own, with its year, publisher,
+  country and TOSEC tags in plain words on the line underneath ("cracked by Fairlight", "bad dump
+  (damaged)"), and disk numbers kept with the title ("Dune · Disk 2 of 3"). The full file name is
+  on hover. The name column takes up the spare width when the window changes size (dragging any divider is smooth: Status, the last column, takes up the difference), the Status column is only as wide as its
+  labels, column headings are no longer cut off, and the green OK label is gone: only disks that
+  need attention have a label
+- The details panel puts what matters first: the disk's proper name (with its year, publisher and
+  tags in plain words), then the buttons (Play, Gotek, Show in folder), the picture, then what's
+  wrong and what can be done about it, then other notes, the facts and the contents. Facts that
+  don't apply are left out instead of showing "—", and the disk's own volume name is shown only
+  when it says something different. The versions and "identified" notes are shorter, with the
+  technical detail (how versions differ, the full TOSEC name) on hover
+- The filter buttons are in two labelled rows: SHOW (All items, Favourites, Games, Music, Utilities,
+  Coverdisks…) and NEEDS ATTENTION (Problems, Can be fixed, Warnings, Sets to complete, Duplicates,
+  Empty, Repaired copies). Non-DOS disks and Hard drives are under More, which shows the one chosen.
+  The Needs attention row goes when nothing needs attention
+- In a narrow window the name column keeps its room: Volume / Title gives way first, and comes back
+  when the window is wider
+- The counts agree: the heading shows the same number of items as All items, and every "of N
+  items" line uses it too. Hover over the heading for what isn't counted (spare copies, grouped
+  versions, empty files). The All items line counts empty files the same way as the Empty chip,
+  and says separately how many more are empty but have a working copy. The status bar no longer
+  has its own, different, problem counts
+- The toolbar has what you do most: Play (Ctrl+P) first, which says "Play tune" for tunes and is
+  greyed out when what is selected can't be played; Copy to Gotek stick; a Scan menu (Rescan all
+  folders F5, Add a folder… Ctrl+O, Choose scan folders…); TurboView; Setup. Find pictures online
+  has moved to the Tools menu (it runs by itself after a scan anyway). The toolbar now fits in a
+  narrower window
+- An archive holding several disks of one game (Walker's zip, with disks A, B and C) is named for
+  the whole game, not for its first disk, so it no longer shows as a set with disks missing. If it
+  holds only some of the disks, its name says which ("Disks 1, 2 of 3"). On David's catalogue this
+  fixed 23 games wrongly shown as missing disks (Lemmings, Monkey Island, The Settlers, Flashback,
+  Ambermoon…). When one of an archive's disks also matches another release of the game (Pinball
+  Fantasies' disk 1 is the same as the four-disk release's), the number of disks most of them agree
+  on wins
+- Work TurboCAT does by itself (looking for pictures after a scan) shows as a slim bar with Stop in
+  the status line, instead of a full-width bar above the list; scans, and searches you ask for,
+  still get the big bar. The status line shows TurboCAT's version, with the catalogue file on hover
+  (Help › About has it too)
+- "Group sets and versions" is a tick box, so it's clear whether it's on
+- Finding pictures online matches more names: when the exact name isn't in the picture list,
+  TurboCAT tries again ignoring small words, version numbers and edition words ("Dune II - The
+  Battle for Arrakis" finds "Dune II - Battle for Arrakis"; "Aladdin - HD Installer", "Epic -
+  Trainer +5" and "Chambers of Shaolin CD32" find their games). Disks not found before are tried
+  again once. Tunes and ROMs on their own are no longer looked up as games
+- Disks with no picture of their own and none online get one drawn from the disk: its Workbench
+  window, with the disk's own icons where the disk puts them, in the colours of the Workbench they
+  were drawn for; or, for a disk with no icons, an AmigaDOS Shell window listing it. A title screen
+  found later always takes their place. Games still without a picture show a generic Game picture,
+  and utilities with nothing to draw a generic picture for their kind (disk tools, virus killers,
+  music tools, graphics, programming, packers, system, office). On David's catalogue: 1,276 more
+  utility disks with a picture
+- Fixed: a scan stopped with "'utf-8' codec can't encode character … surrogates not allowed" when
+  an old LHA archive, unpacked with the lha program, held an Amiga file named in Latin-1 (such as
+  "Français"). Those names are now read as Latin-1, any name that still isn't valid text is cleaned
+  before it's stored, and one file that can't be catalogued no longer stops the scan: it's skipped
+  and named in the scan's result
+- Faster: the window opens at once ("Opening the catalogue…") and reads the catalogue in the
+  background; reloads take about a third of the time (results that don't change between reloads,
+  such as tidied names, coverdisk matching, repair plans and collection lists, are remembered until
+  something changes); and while pictures are being found, the list shows them in place instead of
+  rebuilding everything every 8 seconds, which used to freeze the window
+- Play puts a set of up to four disks in DF0: to DF3: (an Amiga's four drives), so a game asking for
+  disk 3 finds it, as Worms - The Director's Cut does. Before, only the first two disks were in
+  drives and the rest only in the emulator's disk swapper. Sets of more than four are in the swapper
+  too
+- Play's A1200 has 8 MB of Fast RAM, as most A1200s had with a trapdoor expansion: some AGA games
+  crash with a "Software Failure" on a plain 2 MB A1200 (Worms - The Director's Cut)
+- Play never hands an emulator an original disk image: a plain ADF is copied to TurboCAT's play
+  folder first, so a game that saves to its disk (high scores, settings) changes the copy, which is
+  kept for next time. FS-UAE keeps its own files (save states, disk overlays) in TurboCAT's folder
+  (~/.local/share/turbocat/fs-uae) instead of ~/Documents/FS-UAE
 
 ## 4.0.0-alpha.4 — 8–10 Nov 2026
 

@@ -61,8 +61,23 @@ def _publisher(name):
     return None
 
 
+_lr = {}
+
+
 def _libretro_titles():
-    """Game titles from the libretro-thumbnails list, if it was downloaded before (no network)."""
+    """Game titles from the libretro-thumbnails list, if it was downloaded before (no network).
+    Read again only when the file changes."""
+    path = os.path.join(CACHE, "libretro-amiga.json")
+    try:
+        stamp = os.path.getmtime(path)
+    except OSError:
+        return set()
+    if _lr.get("stamp") != stamp:
+        _lr.update(stamp=stamp, titles=_read_libretro_titles())
+    return _lr["titles"]
+
+
+def _read_libretro_titles():
     try:
         with open(os.path.join(CACHE, "libretro-amiga.json")) as f:
             tree = json.load(f)
@@ -98,8 +113,8 @@ def classify(cat):
         base = os.path.basename(src.rstrip("/"))
         kids = inner.get(m["id"], [])
         names = [base] + [os.path.basename(k["inner_path"] or "") for k in kids]
-        if m["status"] == "empty":
-            continue
+        if m["status"] == "empty" or m["kind"] in ("module", "kickstart"):
+            continue                 # a tune or a ROM on its own isn't a game, whatever its name
         # Strong signs: always count.
         if m["whd_name"] or any(k["whd_name"] for k in kids):
             found[m["id"]] = "WHDLoad game"

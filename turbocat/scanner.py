@@ -259,6 +259,15 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
     new_tools = set(tools_now) - set(catalogue.get_meta("helper_tools", []))
     retry = catalogue.sources_with_message(sorted({readers.HELPER_TOOLS[t] for t in new_tools}))
 
+    # Zips catalogued before TurboCAT knew to leave out ones that aren't Amiga (Office documents
+    # and the like): take them out, as long as they're in the folders being scanned.
+    summary["not_amiga"] = []
+    for mid, src, why in catalogue.not_amiga_items():
+        if any(folders.within(folders.norm(src), folders.norm(p)) for p in found):
+            catalogue.forget([src])
+            summary["not_amiga"].append((src, why))
+    taken_out = {src for src, _ in summary["not_amiga"]}
+
     # Pass 1 - decide what needs reading. Cheap: a size and date check for files already
     # catalogued, and the first 1 KB of anything new to recognise it.
     work = []
@@ -285,6 +294,12 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
             summary["ignored"] += 1
             continue
         kind = detect(path, head[:1024], size)
+        if kind == "zip":
+            why = readers.zip_not_amiga(path)
+            if why:                  # a Word document, a zipped WhatsApp chat…: not Amiga
+                if path not in taken_out:
+                    summary["not_amiga"].append((path, why))
+                continue
         if kind is None and emulator.looks_like_rom(head, size):
             kind = "kickstart"       # a Kickstart ROM: Play in emulator and TurboView use these
         if kind is None and music.identify(os.path.basename(path), head):
@@ -347,6 +362,15 @@ def scan(paths, catalogue, rescan=False, progress=print, folders_as_volumes=Fals
         try:
             mid, res = analyse_container(kind, data, os.path.basename(path), path, 0, catalogue,
                                          None, number, path_on_disk=path, tick=tick)
+        except (UnicodeError, ValueError) as ex:
+            # one file that can't be catalogued doesn't stop the scan: say which, and carry on
+            catalogue.db.rollback()
+            summary.setdefault("failed", []).append((path, str(ex)))
+            if progress:
+                progress(f"Couldn't catalogue {os.path.basename(path)}: {ex}")
+            data = None
+            done_bytes += size
+            continue
         except BaseException:
             # stopped part way through: leave this file as it was, so the next scan reads it again
             catalogue.db.rollback()

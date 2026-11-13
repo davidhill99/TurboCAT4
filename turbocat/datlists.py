@@ -65,12 +65,23 @@ def _read(path):
     return None
 
 
+_folders = {}       # folder -> (its modification time, the list files in it)
+
+
 def lists_in(folders):
     """Every collection list found in these folders (not their subfolders)."""
     out = []
     for folder in sorted(set(folders)):
-        for path in glob.glob(os.path.join(glob.escape(folder), "*_files.xml")) + \
-                glob.glob(os.path.join(glob.escape(folder), "*.dat")):
+        try:
+            stamp = os.stat(folder).st_mtime          # changes when a file is added or removed
+        except OSError:
+            continue
+        seen = _folders.get(folder)
+        if seen is None or seen[0] != stamp:
+            seen = (stamp, glob.glob(os.path.join(glob.escape(folder), "*_files.xml")) +
+                    glob.glob(os.path.join(glob.escape(folder), "*.dat")))
+            _folders[folder] = seen
+        for path in seen[1]:
             try:
                 mtime = os.path.getmtime(path)
             except OSError:

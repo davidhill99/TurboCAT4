@@ -227,8 +227,27 @@ def _judge(item):
     item.use, item.confidence = best[0], "unsure"
 
 
+_plans = {}
+
+
 def plan_all(cat, top_ids=None):
-    """Plans for every damaged item (or those given): {top id: Plan}."""
+    """Plans for every damaged item (or those given): {top id: Plan}. The plans for every item are
+    remembered until the catalogue (anything added, removed or read again) or the repair log
+    changes, since the window asks for them on every reload."""
+    if top_ids is None:
+        try:
+            log_stamp = os.path.getmtime(LOG)
+        except OSError:
+            log_stamp = None
+        stamp = (getattr(cat, "path", id(cat)), tuple(cat.db.execute(
+            "SELECT COUNT(*), MAX(id), MAX(scanned_at) FROM media").fetchone()), log_stamp)
+        if _plans.get("stamp") != stamp:
+            _plans.update(stamp=stamp, plans=_plan_all(cat))
+        return dict(_plans["plans"])
+    return _plan_all(cat, top_ids)
+
+
+def _plan_all(cat, top_ids=None):
     ix = Index(cat)
     if top_ids is None:
         bad = {ix.top[r["id"]] for r in cat.db.execute(
