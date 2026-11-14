@@ -11,7 +11,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 HERE = os.path.abspath(SPECPATH)
 ROOT = os.path.dirname(HERE)
-BUNDLE = os.path.join(HERE, "bundle")
+HELPERS = os.path.join(HERE, "bundle")      # (not BUNDLE: that is PyInstaller's macOS app step)
 ICONS = os.path.join(HERE, "build-icons")
 
 sys.path.insert(0, ROOT)
@@ -19,8 +19,8 @@ from turbocat import VERSION  # noqa: E402
 
 datas = [(os.path.join(ROOT, "turbocat", "icons"), os.path.join("turbocat", "icons")),
          (os.path.join(ROOT, "turbocat", "amiga", "TurboView"), os.path.join("turbocat", "amiga"))]
-binaries = ([(p, "bin") for p in glob.glob(os.path.join(BUNDLE, "bin", "*"))]
-            + [(p, os.path.join("turbocat", "lib")) for p in glob.glob(os.path.join(BUNDLE, "lib", "*"))])
+binaries = ([(p, "bin") for p in glob.glob(os.path.join(HELPERS, "bin", "*"))]
+            + [(p, os.path.join("turbocat", "lib")) for p in glob.glob(os.path.join(HELPERS, "lib", "*"))])
 # amitools' vamos (an AmigaOS emulator for the command line) isn't used by TurboCAT
 hidden = collect_submodules("amitools", filter=lambda n: not n.startswith("amitools.vamos")) + [
     "lhafile", "PySide6.QtSvg", "PySide6.QtMultimedia"]
