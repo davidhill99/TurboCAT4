@@ -117,6 +117,15 @@ Run the commands from inside the `TurboCAT4` folder.
 
 The catalogue is stored in `~/turbocat.db` (change with `--db FILE`).
 
+## Licence and contact
+
+TurboCAT 4 is free software: you can use, share and change it under the terms of the **GNU General
+Public License, version 3 or later** (see [LICENSE](LICENSE)). It builds on amitools (GPL-2.0-or-later),
+Qt for Python (LGPL), lhafile (BSD), libopenmpt (BSD), 7-Zip (LGPL) and xdms (public domain), and on
+Keir Fraser's public-domain 68000 inflate in TurboView.
+
+Contact: **tcpturbocat@gmail.com** (or Help › Report a problem / Suggest an idea in TurboCAT).
+
 ## Privacy
 
 TurboCAT collects nothing about you: no accounts, analytics or tracking, and your disks and catalogue never leave your computer. [PRIVACY.md](PRIVACY.md) lists what it contacts online and when (the same text is in Help › Privacy).

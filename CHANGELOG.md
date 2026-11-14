@@ -5,7 +5,7 @@ Author: David Hill
 What changed in each release, newest first. Work not yet in a numbered release is under
 **Unreleased**.
 
-## Unreleased
+## 4.0.0-beta.1 — first public test release (not yet published)
 
 - **DMS disks work in the Windows and macOS packages too**: xdms 1.3.2 (public domain) is compiled
   from its official source in each build (checked by its SHA-256) and carried inside, so every package

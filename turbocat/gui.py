@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
                                QTableView, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
-from . import APP_NAME, VERSION
+from . import APP_NAME, CONTACT, LICENCE, VERSION
 from . import aminet, diskmap, drivesound, explain, feedback, paths, privacy, madepics, readers, repair, stats
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
@@ -4520,7 +4520,7 @@ class FeedbackDialog(QDialog):
             "This goes to TurboCAT's page on GitHub, where the people working on it see it. "
             "<b>Open report</b> opens your browser with it filled in: check it, then press "
             "<b>Submit</b> there (a free GitHub account is needed). No account? <b>Copy details</b> "
-            "and send it by email or post it in a forum instead.", ui_font(13), "muted"))
+            f"and email it to {CONTACT}, or post it in a forum instead.", ui_font(13), "muted"))
         v.addSpacing(4)
         v.addWidget(QLabel("<b>Sum it up in one line</b> (this becomes its title)"))
         self.title = QLineEdit()
@@ -5037,6 +5037,8 @@ class AboutDialog(QDialog):
         link.setTextFormat(Qt.TextFormat.RichText)
         link.setOpenExternalLinks(True)
         v.addWidget(link)
+        v.addWidget(_wrap_label(f"Free software under the GNU General Public License, version 3 or later "
+                                f"({LICENCE}). Contact: {CONTACT}", ui_font(12), "muted"))
         v.addWidget(_wrap_label("Ideas are welcome: tell the people working on TurboCAT what you'd like it "
                                 "to do, or what didn't work.", ui_font(12), "muted"))
 

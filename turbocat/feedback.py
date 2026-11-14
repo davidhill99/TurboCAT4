@@ -20,6 +20,7 @@ import urllib.parse
 from . import APP_NAME, VERSION
 
 REPO = "https://github.com/davidhill99/TurboCAT4"
+from . import CONTACT  # noqa: E402  (where reports go by email)
 # Issue forms in the repository (.github/ISSUE_TEMPLATE): their field ids are filled from the link
 TEMPLATES = {"problem": "problem.yml", "idea": "idea.yml", "amiga": "amiga.yml"}
 MAX_URL = 7500           # browsers and GitHub cope with links about this long

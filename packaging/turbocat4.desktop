@@ -1,10 +1,13 @@
 [Desktop Entry]
+# A launcher for running TurboCAT from its source folder on Linux. Copy it to
+# ~/.local/share/applications/ and change the three paths to where TurboCAT4 and its Python
+# environment are (the packaged AppImage has its own launcher inside).
 Type=Application
 Name=TurboCAT 4
 Comment=Amiga disk cataloguer
-Path=/home/david/TurboCAT4
-Exec=/home/david/turbocat-env/bin/python -m turbocat window
-Icon=/home/david/TurboCAT4/turbocat/icons/mark.svg
+Path=/path/to/TurboCAT4
+Exec=/path/to/turbocat-env/bin/python -m turbocat window
+Icon=/path/to/TurboCAT4/turbocat/icons/mark.svg
 Terminal=false
 Categories=Utility;
 StartupWMClass=turbocat4

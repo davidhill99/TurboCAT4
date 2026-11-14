@@ -51,8 +51,8 @@ KEPT = [
 KEPT_NOTE = "All of it stays on your computer. Delete any of these folders and TurboCAT starts afresh."
 
 GITHUB = ("Reports filed on GitHub are public on TurboCAT's GitHub page, and GitHub keeps them under "
-          "its own privacy policy, not TurboCAT's. Anything you send by email instead goes only to "
-          "whoever you send it to.")
+          "its own privacy policy, not TurboCAT's. Reports sent by email go to tcpturbocat@gmail.com, "
+          "read only by the people working on TurboCAT, and are never passed on.")
 
 SECTIONS = ["What TurboCAT sends over the internet", "What it never does",
             "What it keeps, all on your computer", "Reports on GitHub"]

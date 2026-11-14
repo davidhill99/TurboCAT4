@@ -32,4 +32,4 @@ All of it stays on your computer. Delete any of these folders and TurboCAT start
 
 ## Reports on GitHub
 
-Reports filed on GitHub are public on TurboCAT's GitHub page, and GitHub keeps them under its own privacy policy, not TurboCAT's. Anything you send by email instead goes only to whoever you send it to.
+Reports filed on GitHub are public on TurboCAT's GitHub page, and GitHub keeps them under its own privacy policy, not TurboCAT's. Reports sent by email go to tcpturbocat@gmail.com, read only by the people working on TurboCAT, and are never passed on.
