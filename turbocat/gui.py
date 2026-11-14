@@ -3344,6 +3344,7 @@ class TurboViewWorker(QThread):
         self.stop_wanted = False
 
     def run(self):
+        cat = None
         try:
             cat = Catalogue(self.db_path)
             if not _has_disks(cat):       # nothing to list: don't make TurboView's folder yet
@@ -3352,6 +3353,9 @@ class TurboViewWorker(QThread):
             turboview.export(cat, load_items(cat), folder)
         except Exception:
             pass
+        finally:
+            if cat is not None:           # let go of the file (Windows can't delete or move it otherwise)
+                cat.db.close()
 
 
 class PictureWorker(QThread):
