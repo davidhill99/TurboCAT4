@@ -35,16 +35,17 @@ See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
 ## Downloads (test builds)
 
 GitHub builds ready-to-run packages from this code: **Actions › Build › Run workflow**, or tag a
-version (`v4.0.0`) to attach them to a draft release. Each carries Python, Qt, 7-Zip and libopenmpt:
+version (`v4.0.0`) to attach them to a draft release. Each carries Python, Qt, 7-Zip (LHA archives),
+xdms (DMS disks) and libopenmpt (music):
 
 - **Windows**: `TurboCAT-…-Windows-Setup.exe` (installs for you only, no admin rights), or the
   portable zip. Windows shows "Windows protected your PC" until the package is signed: More info › Run anyway.
 - **macOS**: `TurboCAT-…-macOS-AppleSilicon.dmg` (M1 and later) or `TurboCAT-…-macOS-Intel.dmg` (older
   Macs). Unsigned, so the first time: right-click the app › Open.
-- **Linux**: `TurboCAT-…-x86_64.AppImage`. Make it executable and run it; it includes xdms too.
+- **Linux**: `TurboCAT-…-x86_64.AppImage`. Make it executable and run it.
 
-Not yet in the Windows and macOS packages: xdms (DMS disks; Check setup says how to add it). The
-packages haven't been tried by testers yet.
+The packages haven't been tried by testers yet. Included programs: 7-Zip (LGPL, 7-zip.org), xdms 1.3.2
+(public domain, compiled from zakalwe.fi/~shd/foss/xdms), libopenmpt (BSD, lib.openmpt.org).
 
 ## Setup on Linux Mint / Ubuntu
 

@@ -285,7 +285,8 @@ def read_dms(data: bytes) -> ContainerResult:
             r.problems.append("DMS could not be unpacked: "
                               + (p.stderr or p.stdout).strip()[:200])
             return r
-        adf = open(dst, "rb").read()
+        with open(dst, "rb") as f:          # closed before its folder goes (Windows insists)
+            adf = f.read()
     res = read_adf(adf, "dms")
     res.inner_image = adf
     if p.returncode != 0:
