@@ -132,13 +132,29 @@ jobs:
             dist/*.dmg
             dist/*.AppImage
 
-      - name: Attach to the release (tagged builds)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  # One job attaches every package to one draft release, after all the builds have finished
+  # (four jobs each making the release could race and leave duplicate drafts).
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: |
-            dist/*.exe
-            dist/*.zip
-            dist/*.dmg
-            dist/*.AppImage
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          name: TurboCAT ${{ github.ref_name }}
+          body_path: packaging/release-notes.md
+          files: dist/*
