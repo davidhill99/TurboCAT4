@@ -7,6 +7,8 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## 4.0.0-beta.1 — first public test release (not yet published)
 
+- **A README for users**: the README now starts with what TurboCAT 4 does, TurboView, and the
+  downloads; running from source, the command line and rebuilding TurboView follow at the end
 - **Auf Deutsch**: a German README (LIESMICH.md, linked at the top of the README) and German lines in
   the Aminet readme. The README has a short history: the Amiga Shopper coverdisk (1995) and reviews
   (85% and a 90% Star Buy, 1996), linked to the scans on the Internet Archive
