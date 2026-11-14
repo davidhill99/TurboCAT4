@@ -149,7 +149,8 @@ class Catalogue:
     def guess(self, path):
         """Recognise a coverdisk by its file and folder names: a Coverdisk with how='name' (TOSEC
         knows the disk), how='folder' (a coverdisk, not in TOSEC's list) or None."""
-        parts = [p for p in path.split(os.sep)[-4:] if p]
+        # "/" or "\\": a path inside a ZIP uses "/" even on Windows
+        parts = [p for p in re.split(r"[\\/]", path)[-4:] if p]
         text = " ".join(parts)
         mag = self.magazine_in(text)
         # A file whose own name says nothing of the magazine or issue, in a folder inside the

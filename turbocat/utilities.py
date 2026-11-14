@@ -48,9 +48,12 @@ def classify(cat, rows, game_why, lists, roots):
         if lst is not None:
             out[m["id"]] = f"listed in {lst.title}"
             continue
-        root = next((r for r in roots if path.startswith(r.rstrip("/") + "/")), "")
+        # compared with "/" whatever the system writes (Windows: "\\"), so folders are found everywhere
+        slash = lambda p: p.replace("\\", "/")
+        spath = slash(path)
+        root = next((slash(r) for r in roots if spath.startswith(slash(r).rstrip("/") + "/")), "")
         inside = ([os.path.basename(root.rstrip("/"))] +
-                  os.path.dirname(path)[len(root):].strip("/").split("/")) if root else []
+                  spath.rsplit("/", 1)[0][len(root):].strip("/").split("/")) if root else []
         folder = next((f for f in inside if FOLDER.search(f)), None)
         if folder:
             out[m["id"]] = f"in a folder called {folder}"

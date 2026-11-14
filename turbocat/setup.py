@@ -464,7 +464,7 @@ def guide(name):
             "What it is: the Amiga's built-in software. Most disks need one to start.",
             "What to do: Amiga Forever (amigaforever.com) sells them legally, or copy them from your own "
             "Amiga. You want 1.3 (A500), 2.05 (A600) and 3.1 (A1200).",
-            "Where files go: any folder you scan, or one of these:\n" + roms + found),
+            "Where Kickstart files go: any folder you scan, or one of these:\n" + roms + found),
         "Amiga emulator": (
             "What it is: the program that runs an Amiga on this computer, for Play and TurboView.",
             "What to do: install Amiberry (amiberry.com, or Flathub: com.blitterstudio.amiberry) or "

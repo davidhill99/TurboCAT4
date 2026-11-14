@@ -80,6 +80,7 @@ class KickstartTest(unittest.TestCase):
             row = cat.db.execute("SELECT kind, volume FROM media").fetchone()
             self.assertEqual((row["kind"], row["volume"]), ("kickstart", "Kickstart 3.1"))
             self.assertEqual(emulator.catalogued_rom_dirs(cat), [d])
+            cat.db.close()                  # before the folder goes: Windows won't delete an open file
 
 
 if __name__ == "__main__":

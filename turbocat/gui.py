@@ -5888,6 +5888,7 @@ class MainWindow(QMainWindow):
             details = feedback.error_text(exc_type, exc, tb)
             box = QMessageBox(QMessageBox.Icon.Warning, "TurboCAT hit a problem",
                               "Something went wrong inside TurboCAT.", parent=self)
+            box.setObjectName("crashBox")
             box.setInformativeText(
                 "Your catalogue is saved as TurboCAT goes, so nothing already done is lost. You can "
                 "carry on; if things look wrong, close TurboCAT and start it again.\n\n"
@@ -5937,6 +5938,7 @@ class MainWindow(QMainWindow):
                            "Error reports are off. Help › Show error reports turns them back on.")
                           + "\n\nTelling the people working on TurboCAT what happened helps get it fixed. "
                           "Nothing is sent unless you choose to.", parent=self)
+        ask.setObjectName("errorReportsBox")
         ask.setDetailedText(reason)
         go = ask.addButton("Report it…", QMessageBox.ButtonRole.AcceptRole)
         ask.addButton("No thanks", QMessageBox.ButtonRole.RejectRole)

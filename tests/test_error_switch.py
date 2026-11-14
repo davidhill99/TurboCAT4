@@ -93,7 +93,7 @@ class WindowSwitchTest(unittest.TestCase):
         boxes = self.boxes
 
         def exec_(box):
-            boxes.append(box.windowTitle())
+            boxes.append(box.objectName())     # (macOS shows no titles on message boxes)
             if tick and box.checkBox() is not None:
                 box.checkBox().setChecked(True)
             for b in box.buttons():
@@ -106,7 +106,7 @@ class WindowSwitchTest(unittest.TestCase):
         with self.answer(tick=True, press="Report it…"):
             self.w.show_crash(*err("first"))
         # the error box (whose own Report it… opened the form), then no second offer
-        self.assertEqual(self.boxes, ["TurboCAT hit a problem"])
+        self.assertEqual(self.boxes, ["crashBox"])
         self.assertFalse(self.w.error_reports_on())
         self.assertFalse(self.w.act_errors.isChecked())
         self.boxes.clear()
@@ -118,7 +118,7 @@ class WindowSwitchTest(unittest.TestCase):
     def test_turning_off_after_errors_offers_a_report_with_the_reason(self):
         with self.answer(tick=True, press="Carry on"):
             self.w.show_crash(*err("first"))
-        self.assertEqual(self.boxes[-1], "Error reports")      # the offer
+        self.assertEqual(self.boxes[-1], "errorReportsBox")      # the offer
         self.assertEqual(self.reports, [])                     # nothing unless asked
         self.w.switch_offered = False
         with self.answer(press="Report it…"):
@@ -138,7 +138,7 @@ class WindowSwitchTest(unittest.TestCase):
                 self.w.show_crash(*err(f"problem {i}"))
             self.assertEqual(len(self.boxes), feedback.STORM_SHOWN)
             self.w.show_crash(*err("one more"))
-        self.assertEqual(self.boxes[-1], "Error reports")     # paused, with the offer
+        self.assertEqual(self.boxes[-1], "errorReportsBox")     # paused, with the offer
         self.assertTrue(self.w.crash_paused)
         self.assertTrue(self.w.error_reports_on())             # only for this session
         n = len(self.boxes)
@@ -150,7 +150,7 @@ class WindowSwitchTest(unittest.TestCase):
         with self.answer(press="Carry on"):
             self.w.show_crash(*err("same"))
             self.w.show_crash(*err("same"))
-        self.assertEqual(self.boxes, ["TurboCAT hit a problem"])
+        self.assertEqual(self.boxes, ["crashBox"])
 
 
 if __name__ == "__main__":

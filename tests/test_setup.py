@@ -43,9 +43,12 @@ class SetupTest(unittest.TestCase):
         self.assertNotIn("libxmp", names)                    # optional extras don't nag
 
     def test_everything_present(self):
-        found = setup.run(emulators={"fs-uae": ["fs-uae"]},
-                          kickstarts={"A500": "a", "A600": "b", "A1200": "c"},
-                          music_versions={"libopenmpt": "0.7", "libxmp": "4.6"})
+        # as if every helper program and library were installed, whatever this computer has
+        with mock.patch.object(setup.helpers, "which", side_effect=lambda name: f"/usr/bin/{name}"), \
+                mock.patch.object(setup.importlib, "import_module"):
+            found = setup.run(emulators={"fs-uae": ["fs-uae"]},
+                              kickstarts={"A500": "a", "A600": "b", "A1200": "c"},
+                              music_versions={"libopenmpt": "0.7", "libxmp": "4.6"})
         important = [c for c in found if c.status != setup.OK and c.important]
         self.assertEqual(important, [])
 

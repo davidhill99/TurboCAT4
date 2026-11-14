@@ -8,6 +8,7 @@ from turbocat.catalogue import Catalogue
 from test_repair import make_adf
 
 J = os.path.join
+N = folders.norm              # how the system writes a path ("/d" on Linux, "D:\\d" on Windows)
 
 
 class SelectionTest(unittest.TestCase):
@@ -16,7 +17,7 @@ class SelectionTest(unittest.TestCase):
     def test_untick_inside_a_ticked_folder_leaves_it_out(self):
         s = folders.Selection(["/d"])
         s.untick("/d/Temp")
-        self.assertEqual((s.roots, s.skips), (["/d"], ["/d/Temp"]))
+        self.assertEqual((s.roots, s.skips), ([N("/d")], [N("/d/Temp")]))
         self.assertEqual(s.state("/d"), "part")
         self.assertEqual(s.state("/d/Temp"), "off")
         self.assertEqual(s.state("/d/Games"), "on")
@@ -30,7 +31,7 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(s.included("/d/Temp/other.adf"))
         self.assertEqual(s.state("/d/Temp"), "part")
         s.tick("/d/Temp")
-        self.assertEqual((s.roots, s.skips), (["/d"], []))
+        self.assertEqual((s.roots, s.skips), ([N("/d")], []))
 
     def test_parent_of_a_ticked_folder_is_half_ticked(self):
         s = folders.Selection(["/home/me/AMIGA"])
@@ -43,7 +44,7 @@ class SelectionTest(unittest.TestCase):
     def test_ticking_a_parent_takes_in_the_folders_inside(self):
         s = folders.Selection(["/d/A", "/d/B"])
         s.tick("/d")
-        self.assertEqual(s.roots, ["/d"])
+        self.assertEqual(s.roots, [N("/d")])
 
     def test_gains(self):
         old = folders.Selection(["/d"], ["/d/Temp"])
