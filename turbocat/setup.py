@@ -9,6 +9,8 @@ import os
 import platform
 import shutil
 import sys
+
+from . import paths
 from dataclasses import dataclass, field
 
 from . import tools as helpers
@@ -138,7 +140,7 @@ def run(emulators=None, kickstarts=None, music_versions=None):
 
     # Emulators
     emus = emulators if emulators is not None else emulator.find_emulators()
-    found = ", ".join({"amiberry": "Amiberry", "fs-uae": "FS-UAE"}[k] +
+    found = ", ".join(emulator.NAMES.get(k, k) +
                       (" (Flatpak)" if v[:1] == ["flatpak"] else "") for k, v in emus.items())
     if emus:
         out.append(Check("Amiga emulator", "Plays disks (Play in emulator) and runs TurboView", OK, found))
@@ -323,7 +325,8 @@ def features(checks, imp=None, roms=None):
     home = os.path.expanduser("~")
     writable = os.access(home, os.W_OK)
     out.append(Feature("Repairing damaged disks", OK if ok("amitools") and writable else MISSING,
-                       "Repaired copies are made in ~/TurboCAT/Repaired" if ok("amitools") and writable
+                       "Repaired copies are made in " + paths.shown(paths.repaired_dir())
+                       if ok("amitools") and writable
                        else "Needs amitools, and a home folder TurboCAT can write to", ["amitools"]))
 
     out.append(Feature("Proper names for disks", OK if ok("List of Amiga disks") else PARTIAL,
@@ -451,14 +454,15 @@ def guide(name):
             "What it does: rebuilds a damaged disk as a new image, putting back damaged files from copies "
             "on your other disks. The original is never changed.",
             "What to do: nothing to install. Choose a disk under Problems › Can be fixed.",
-            "Where files go: repaired copies in ~/TurboCAT/Repaired; a log of what came from where in "
-            "~/.local/share/turbocat/repairs.csv."),
+            "Where files go: repaired copies in " + paths.shown(paths.repaired_dir()) + "; a log of "
+            "what came from where in " + paths.shown(os.path.join(paths.data_dir(), "repairs.csv")) + "."),
         "Proper names for disks": (
             "What it does: finds each disk's proper TOSEC name from its checksum, however its file is "
             "called.",
             "What to do: Tools › Identify disks online… downloads TOSEC's lists once (about 100 MB), "
             "and again every two months. Or put TOSEC .dat files beside your disks.",
-            "Where files go: the lists are kept in ~/.cache/turbocat/tosec. Your files aren't renamed "
+            "Where files go: the lists are kept in " + paths.shown(os.path.join(paths.cache_dir(), "tosec"))
+            + ". Your files aren't renamed "
             "unless you choose Tools › Rename files to their proper names…"),
         "Kickstart ROMs": (
             "What it is: the Amiga's built-in software. Most disks need one to start.",
@@ -471,7 +475,8 @@ def guide(name):
             "FS-UAE" + (" (sudo apt install fs-uae)" if apt else " (fs-uae.net)") + ". Both can be "
             "installed; the Play window lets you choose.",
             "Where files go: FS-UAE keeps its save states and disk changes in "
-            "~/.local/share/turbocat/fs-uae. Play gives emulators copies of your disks, so your "
+            + paths.shown(os.path.join(paths.data_dir(), "fs-uae")) + ". Play gives emulators copies "
+            "of your disks, so your "
             "originals are never written to."),
     }
     aliases = {"amitools": "Reading disk images", "lhafile": "LHA archives", "lha (lhasa)": "LHA archives",

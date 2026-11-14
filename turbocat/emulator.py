@@ -16,7 +16,7 @@ import subprocess
 import zipfile
 import zlib
 
-from . import gotek
+from . import gotek, paths
 from .pictures import CACHE, clean_title, normal
 
 PLAY_DIR = os.path.join(CACHE, "play")
@@ -40,8 +40,55 @@ A4000_CRC = {"43b6dd22", "3ac99edc", "5b47f34a", "2238b0b4"}      # 3.1 A4000 RO
 
 # ---------------------------------------------------------------- finding things
 
+NAMES = {"amiberry": "Amiberry", "fs-uae": "FS-UAE", "winuae": "WinUAE"}
+ORDER = ("amiberry", "winuae", "fs-uae")          # how they're offered, the usual choice first
+
+
+def _first_file(paths_):
+    return next((p for p in paths_ if p and os.path.isfile(p)), None)
+
+
+def _windows_emulators():
+    """WinUAE (on its own, or the one inside Amiga Forever) and FS-UAE, in Program Files."""
+    found = {}
+    tops = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA")]
+    tops = [t for t in dict.fromkeys(tops) if t]
+    winuae = shutil.which("winuae64") or shutil.which("winuae") or _first_file(
+        os.path.join(t, *sub) for t in tops for sub in (
+            ("WinUAE", "winuae64.exe"), ("WinUAE", "winuae.exe"),
+            ("Cloanto", "Amiga Forever", "WinUAE", "winuae64.exe"),
+            ("Cloanto", "Amiga Forever", "WinUAE", "winuae.exe")))
+    if winuae:
+        found["winuae"] = [winuae]
+    fsuae = shutil.which("fs-uae") or _first_file(
+        p for t in tops for p in sorted(glob.glob(os.path.join(glob.escape(t), "FS-UAE", "**", "fs-uae.exe"),
+                                                  recursive=True)))
+    if fsuae:
+        found["fs-uae"] = [fsuae]
+    return found
+
+
+def _mac_emulators():
+    """The apps, in /Applications or ~/Applications (or on the PATH, e.g. from Homebrew)."""
+    found = {}
+    apps = ["/Applications", os.path.expanduser("~/Applications")]
+    amiberry = shutil.which("amiberry") or _first_file(
+        os.path.join(a, "Amiberry.app", "Contents", "MacOS", "Amiberry") for a in apps)
+    if amiberry:
+        found["amiberry"] = [amiberry]
+    fsuae = shutil.which("fs-uae") or _first_file(
+        os.path.join(a, "FS-UAE.app", "Contents", "MacOS", "fs-uae") for a in apps)
+    if fsuae:
+        found["fs-uae"] = [fsuae]
+    return found
+
+
 def find_emulators():
-    """{'amiberry': [command...], 'fs-uae': [command...]} for those installed."""
+    """{'amiberry' | 'fs-uae' | 'winuae': [command...]} for those installed."""
+    if paths.system() == "windows":
+        return _windows_emulators()
+    if paths.system() == "mac":
+        return _mac_emulators()
     found = {}
     if shutil.which("amiberry"):
         found["amiberry"] = ["amiberry"]
@@ -437,11 +484,38 @@ def display_args(emulator, display):
 
 DRIVES = 4          # DF0: to DF3:, as many as an Amiga can have
 # FS-UAE keeps its own files (save states, disk overlays, logs) here, not in ~/Documents/FS-UAE
-FSUAE_DIR = os.path.expanduser("~/.local/share/turbocat/fs-uae")
+FSUAE_DIR = os.path.join(paths.data_dir(), "fs-uae")
 # A plain A1200 has 2 MB of Chip RAM and no Fast RAM; most owners added a trapdoor expansion, and
 # some AGA games crash on 2 MB alone (Worms - The Director's Cut: "Software Failure"). So TurboCAT's
 # A1200 has 8 MB of Fast RAM, the most a 68020 A1200 trapdoor card gave.
 A1200_FAST_MB = 8
+
+
+WINUAE_MODELS = {      # (chipset, CPU, Chip RAM in 512 KB steps, slow RAM in 512 KB steps, Fast RAM MB)
+    "A500": ("ocs", "68000", 1, 2, 0),
+    "A600": ("ecs", "68000", 2, 0, 0),
+    "A1200": ("aga", "68ec020", 4, 0, A1200_FAST_MB),
+}
+
+
+def _winuae(base, settings):
+    """WinUAE's command: its settings written to a .uae file it is started with."""
+    folder = os.path.join(paths.cache_dir(), "play")
+    os.makedirs(folder, exist_ok=True)
+    cfg = os.path.join(folder, "turbocat-winuae.uae")
+    with open(cfg, "w", encoding="utf-8") as f:
+        f.write("; Written by TurboCAT for this start of WinUAE\n")
+        for key, value in settings:
+            f.write(f"{key}={value}\n")
+    return list(base) + ["-f", cfg]
+
+
+def _winuae_display(display):
+    if display == "fullscreen":
+        return [("gfx_fullscreen_amiga", "fullwindow")]
+    if display == "1080p":
+        return [("gfx_width_windowed", 1920), ("gfx_height_windowed", 1080)]
+    return []
 
 
 def command(emulator, base, model, rom, files, whdload=None, mounts=(), display="window",
@@ -471,6 +545,22 @@ def command(emulator, base, model, rom, files, whdload=None, mounts=(), display=
         if fast_floppy:
             cmd += ["-s", "floppy_speed=800"]
         return cmd
+    if emulator == "winuae":
+        chipset, cpu, chip, slow, fast = WINUAE_MODELS.get(model, WINUAE_MODELS["A500"])
+        settings = [("use_gui", "no"), ("chipset", chipset), ("cpu_type", cpu), ("chipmem_size", chip),
+                    ("bogomem_size", slow), ("fastmem_size", fast),
+                    ("nr_floppies", max(1, min(len(files), DRIVES)))]
+        if rom:
+            settings.append(("kickstart_rom_file", rom))
+        for i, f in enumerate(files[:DRIVES]):
+            settings += [(f"floppy{i}", f), (f"floppy{i}type", 0)]
+        for i, f in enumerate(files):
+            settings.append((f"diskimage{i}", f))       # the disk swapper, for sets of more than four
+        for vol, folder in mounts:
+            settings.append(("filesystem2", f"rw,{vol}:{vol}:{folder},-128"))
+        if fast_floppy:
+            settings.append(("floppy_speed", 800))
+        return _winuae(base, settings + _winuae_display(display))
     os.makedirs(FSUAE_DIR, exist_ok=True)
     cmd = list(base) + [f"--base_dir={FSUAE_DIR}", f"--amiga_model={model}"] + display_args(emulator, display)
     if rom:
@@ -508,6 +598,17 @@ def turboview_command(emulator, base, rom, folder, roots, display="window"):
         for i, (path, vol) in enumerate(roots, 1):
             cmd += ["-s", f"filesystem2=ro,DH{i}:{vol}:{path},-128"]
         return cmd
+    if emulator == "winuae":
+        chipset, cpu, chip, slow, _fast = WINUAE_MODELS["A1200"]
+        settings = [("use_gui", "no"), ("chipset", chipset), ("cpu_type", cpu), ("chipmem_size", chip),
+                    ("fastmem_size", 8), ("cpu_speed", "max"), ("cpu_cycle_exact", "false"),
+                    ("gfx_resolution", "superhires"), ("nr_floppies", 2), ("floppy1type", 0),
+                    ("filesystem2", f"rw,DH0:TurboCAT:{folder},0")]
+        if rom:
+            settings.append(("kickstart_rom_file", rom))
+        for i, (path, vol) in enumerate(roots, 1):
+            settings.append(("filesystem2", f"ro,DH{i}:{vol}:{path},-128"))
+        return _winuae(base, settings + _winuae_display(display))
     os.makedirs(FSUAE_DIR, exist_ok=True)
     cmd = list(base) + [f"--base_dir={FSUAE_DIR}", "--amiga_model=A1200", "--floppy_drive_count=2", "--fast_memory=8192",
                         "--uae_cpu_speed=max",                 # TurboView opens 640x512 here (SCREEN=HIGH)
@@ -523,4 +624,4 @@ def turboview_command(emulator, base, rom, folder, roots, display="window"):
 def launch(cmd):
     """Start the emulator on its own (closing TurboCAT doesn't close it)."""
     return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+                            stderr=subprocess.DEVNULL, **paths.detached())

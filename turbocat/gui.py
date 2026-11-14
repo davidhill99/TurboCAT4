@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QTableView, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
 from . import APP_NAME, VERSION
-from . import aminet, diskmap, drivesound, explain, feedback, privacy, madepics, readers, repair, stats
+from . import aminet, diskmap, drivesound, explain, feedback, paths, privacy, madepics, readers, repair, stats
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
 from . import coverdisks, datlists, folders, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
@@ -3496,10 +3496,9 @@ class PlayDialog(QDialog):
         grid.setVerticalSpacing(8)
         grid.addWidget(QLabel("Emulator"), 0, 0)
         self.emu_box = QComboBox()
-        names_ = {"amiberry": "Amiberry", "fs-uae": "FS-UAE"}
-        for key in ("amiberry", "fs-uae"):
+        for key in emulator.ORDER:
             if key in emulators:
-                self.emu_box.addItem(names_[key], key)
+                self.emu_box.addItem(emulator.NAMES[key], key)
         last = cat.get_meta("emulator", "amiberry")
         if self.whdload:                               # only Amiberry boots WHDLoad archives itself
             i = self.emu_box.findData("amiberry")
@@ -4398,7 +4397,7 @@ class SetupDialog(QDialog):
 class RenameDialog(QDialog):
     """Show the files that would be renamed to their TOSEC names; rename the ticked ones."""
 
-    LOG = os.path.expanduser("~/.local/share/turbocat/renames.csv")
+    LOG = os.path.join(paths.data_dir(), "renames.csv")
 
     def __init__(self, parent, plan):
         super().__init__(parent)

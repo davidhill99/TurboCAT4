@@ -1,6 +1,6 @@
 # TurboCAT privacy statement
 
-Last updated 13 November 2026.
+Last updated 14 November 2026.
 
 TurboCAT collects nothing about you. There are no accounts, no analytics, no tracking and no usage statistics. Your disk images, your file lists and your catalogue never leave your computer.
 
@@ -23,10 +23,10 @@ Only when you use these features:
 
 ## What it keeps, all on your computer
 
-- **Your catalogue**: where you chose (normally ~/turbocat.db), with safety copies in a folder beside it
-- **Pictures, disk lists and Aminet files it downloaded**: ~/.cache/turbocat
-- **Logs of repaired copies and renamed files**: ~/.local/share/turbocat
-- **Repaired and tidied copies of disks**: ~/TurboCAT/Repaired
+- **Your catalogue**: where you chose (normally ~/turbocat.db on Linux; AppData\Roaming\TurboCAT on Windows; Library/Application Support/TurboCAT on macOS), with safety copies in a folder beside it
+- **Pictures, disk lists and Aminet files it downloaded**: ~/.cache/turbocat on Linux; AppData\Local\TurboCAT on Windows; Library/Caches/TurboCAT on macOS
+- **Logs of repaired copies and renamed files**: ~/.local/share/turbocat on Linux; beside the catalogue on Windows and macOS
+- **Repaired and tidied copies of disks**: TurboCAT/Repaired in your home folder
 
 All of it stays on your computer. Delete any of these folders and TurboCAT starts afresh.
 

@@ -5,7 +5,7 @@ Keep it true: when a feature starts contacting a new site, or sends something ne
 """
 import html
 
-UPDATED = "13 November 2026"
+UPDATED = "14 November 2026"
 
 INTRO = ("TurboCAT collects nothing about you. There are no accounts, no analytics, no tracking and "
          "no usage statistics. Your disk images, your file lists and your catalogue never leave your "
@@ -38,11 +38,15 @@ NEVER = [
 ]
 
 KEPT = [
-    ("Your catalogue", "where you chose (normally ~/turbocat.db), with safety copies in a folder "
-                       "beside it"),
-    ("Pictures, disk lists and Aminet files it downloaded", "~/.cache/turbocat"),
-    ("Logs of repaired copies and renamed files", "~/.local/share/turbocat"),
-    ("Repaired and tidied copies of disks", "~/TurboCAT/Repaired"),
+    ("Your catalogue", "where you chose (normally ~/turbocat.db on Linux; AppData\\Roaming\\TurboCAT on "
+                       "Windows; Library/Application Support/TurboCAT on macOS), with safety copies in a "
+                       "folder beside it"),
+    ("Pictures, disk lists and Aminet files it downloaded", "~/.cache/turbocat on Linux; "
+                                                            "AppData\\Local\\TurboCAT on Windows; "
+                                                            "Library/Caches/TurboCAT on macOS"),
+    ("Logs of repaired copies and renamed files", "~/.local/share/turbocat on Linux; beside the "
+                                                  "catalogue on Windows and macOS"),
+    ("Repaired and tidied copies of disks", "TurboCAT/Repaired in your home folder"),
 ]
 KEPT_NOTE = "All of it stays on your computer. Delete any of these folders and TurboCAT starts afresh."
 

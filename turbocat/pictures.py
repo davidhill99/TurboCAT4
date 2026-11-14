@@ -18,10 +18,10 @@ import time
 import urllib.parse
 import urllib.request
 
-from . import amigaimg, music, readers
+from . import amigaimg, music, paths, readers
 from .gotek import _unpack_floppy
 
-CACHE = os.path.expanduser("~/.cache/turbocat")
+CACHE = paths.cache_dir()      # ~/.cache/turbocat on Linux
 PIC_DIR = os.path.join(CACHE, "pictures")
 LR_REPO = "libretro-thumbnails/Commodore_-_Amiga"
 LR_TREE = f"https://api.github.com/repos/{LR_REPO}/git/trees/master?recursive=1"

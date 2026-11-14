@@ -28,10 +28,10 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from . import VERSION, aminet, bootblock, explain, gotek
+from . import VERSION, aminet, bootblock, explain, gotek, paths
 
-REPAIRED_DIR = os.path.expanduser("~/TurboCAT/Repaired")
-LOG = os.path.expanduser("~/.local/share/turbocat/repairs.csv")
+REPAIRED_DIR = paths.repaired_dir()
+LOG = os.path.join(paths.data_dir(), "repairs.csv")
 MARKER = "Repaired-by-TurboCAT"
 FLOPPY = ("adf", "adz", "dms")
 DD_SIZE = 901120

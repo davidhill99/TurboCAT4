@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from . import bootblock, lzx, tools
+from . import bootblock, lzx, paths, tools
 
 DD_SIZE, HD_SIZE = 901120, 1802240
 AMIGA_EPOCH = datetime.datetime(1978, 1, 1)
@@ -279,7 +279,7 @@ def read_dms(data: bytes) -> ContainerResult:
         src, dst = os.path.join(td, "in.dms"), os.path.join(td, "out.adf")
         with open(src, "wb") as f:
             f.write(data)
-        p = subprocess.run([exe, "-q", "u", src, "+" + dst], capture_output=True, text=True)
+        p = subprocess.run([exe, "-q", "u", src, "+" + dst], capture_output=True, text=True, **paths.no_window())
         if not os.path.exists(dst):
             r = ContainerResult("dms")
             r.problems.append("DMS could not be unpacked: "
@@ -447,7 +447,7 @@ def _lha_with_tool(data):
             os.makedirs(out)
             try:
                 r = subprocess.run([exe] + args, cwd=os.path.join(tmp, run_in), capture_output=True,
-                                   timeout=60)
+                                   timeout=60, **paths.no_window())
             except (OSError, subprocess.TimeoutExpired):
                 continue
             entries = []

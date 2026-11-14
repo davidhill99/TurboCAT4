@@ -13,13 +13,15 @@ def norm(p):
 
 
 def within(path, root):
-    """True if path is root or inside it."""
+    """True if path is root or inside it. Without regard to case where the system ignores it
+    (Windows: D:\\Amiga and d:\\AMIGA are the same folder)."""
+    path, root = os.path.normcase(path), os.path.normcase(root)
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
 def inside(path, root):
     """True if path is inside root (not root itself)."""
-    return path != root and within(path, root)
+    return os.path.normcase(path) != os.path.normcase(root) and within(path, root)
 
 
 def tidy(roots, skips):

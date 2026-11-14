@@ -15,12 +15,12 @@ import tempfile
 import zipfile
 from dataclasses import dataclass, field
 
-from . import tools
+from . import paths, tools
 from .readers import DD_SIZE, HD_SIZE
 
 FLOPPY_KINDS = ("adf", "adz", "dms")
 ARCHIVE_KINDS = ("lha", "lzx", "zip")
-STICK_FS = ("vfat", "exfat", "msdos", "fat", "fat32")
+STICK_FS = ("vfat", "exfat", "msdos", "fat", "fat32", "fat16", "fat12")
 
 
 @dataclass
@@ -165,7 +165,7 @@ def _unpack_floppy(kind, data):
         src, dst = os.path.join(td, "in.dms"), os.path.join(td, "out.adf")
         with open(src, "wb") as f:
             f.write(data)
-        subprocess.run([exe, "-q", "u", src, "+" + dst], capture_output=True)
+        subprocess.run([exe, "-q", "u", src, "+" + dst], capture_output=True, **paths.no_window())
         if not os.path.exists(dst):
             raise ValueError("the DMS file could not be unpacked")
         with open(dst, "rb") as f:
@@ -194,8 +194,39 @@ def adf_bytes(cat, media_id):
     return adf
 
 
+def _sticks_from(volumes, system):
+    """The likely Gotek sticks among Qt's mounted volumes (each with root, name, file system,
+    ready, read-only, free bytes): FAT, writable, and not the system's own disk."""
+    found = []
+    for v in volumes:
+        root, name, fs, ready, read_only, free = v
+        if not ready or read_only or fs.lower() not in STICK_FS:
+            continue
+        if system == "windows":
+            if root.rstrip("\\/").upper() == os.environ.get("SystemDrive", "C:").upper():
+                continue                     # never the Windows drive itself
+        elif system == "mac":
+            if not root.startswith("/Volumes/"):
+                continue                     # sticks appear in /Volumes
+        found.append((root, name or os.path.basename(root.rstrip("\\/")) or root, free))
+    return found
+
+
+def _qt_volumes():
+    from PySide6.QtCore import QStorageInfo
+    return [(v.rootPath(), v.displayName(), bytes(v.fileSystemType()).decode("ascii", "replace"),
+             v.isReady(), v.isReadOnly(), v.bytesAvailable()) for v in QStorageInfo.mountedVolumes()]
+
+
 def find_sticks():
-    """Mounted removable FAT drives, as (mount point, label, free bytes)."""
+    """Mounted removable FAT drives, as (mount point, label, free bytes). Linux reads
+    /proc/mounts; Windows (drive letters) and macOS (/Volumes) ask Qt for the drive list."""
+    from . import paths
+    if paths.system() != "linux":
+        try:
+            return _sticks_from(_qt_volumes(), paths.system())
+        except Exception:
+            return []
     found = []
     try:
         with open("/proc/mounts") as f:
@@ -222,8 +253,12 @@ def find_sticks():
 
 
 def is_removable(path):
-    path = os.path.realpath(path)
-    return any(path == m or path.startswith(m.rstrip("/") + "/") for m, _, _ in find_sticks())
+    path = os.path.normcase(os.path.realpath(path))
+    for m, _, _ in find_sticks():
+        m = os.path.normcase(os.path.realpath(m)).rstrip("\\/")
+        if path == m or path.startswith(m + os.sep):
+            return True
+    return False
 
 
 def next_index(dest):

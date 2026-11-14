@@ -7,6 +7,12 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## Unreleased
 
+- **Getting ready for Windows and macOS** (not yet released for them): TurboCAT's files go in each
+  system's normal place (Linux keeps its folders); it finds WinUAE (also Amiga Forever's) and FS-UAE
+  on Windows, and the Amiberry and FS-UAE apps on macOS, and starts WinUAE with a settings file; Gotek
+  sticks are found from the system's drive list (drive letters, /Volumes); helper programs don't flash
+  a console window on Windows; emulators keep running after TurboCAT closes; folder names ignore case
+  on Windows. Tests run on Linux, Windows and macOS on every push
 - **TurboView on a real Amiga fits the screen**: its explanation scrolls and its result line and
   buttons stay at the bottom, instead of the window growing taller than a 900-pixel screen
 - **TurboView's icons are Workbench 2 icons**: marked revision 1 (as 2.04 and 3.1 make them), so

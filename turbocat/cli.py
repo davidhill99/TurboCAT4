@@ -20,13 +20,13 @@ import os
 import sys
 
 from . import APP_NAME, VERSION
-from . import sets
+from . import paths, sets
 from .bootblock import best_title
 from .catalogue import Catalogue
 from .scanner import rescan_all, scan
 
 STATUS_WORD = {"ok": "OK", "warning": "Warning", "error": "Problem", "empty": "Empty"}
-DEFAULT_DB = os.path.join(os.path.expanduser("~"), "turbocat.db")
+DEFAULT_DB = paths.default_db()      # ~/turbocat.db on Linux
 
 
 def _j(s, default):
