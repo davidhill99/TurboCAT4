@@ -8,7 +8,7 @@ What changed in each release, newest first. Work not yet in a numbered release i
 ## Unreleased
 
 - **Ready-to-run packages, built by GitHub**: a Windows installer (per user, no admin) and portable
-  zip, a macOS .dmg (Apple Silicon) and a Linux AppImage, each with Python, Qt, 7-Zip and libopenmpt
+  zip, macOS .dmg files for Apple Silicon and Intel Macs, and a Linux AppImage, each with Python, Qt, 7-Zip and libopenmpt
   inside (and xdms on Linux). Built on demand or when a version is tagged (then attached to a draft
   release). Unsigned for now
 - **Getting ready for Windows and macOS** (not yet released for them): TurboCAT's files go in each
