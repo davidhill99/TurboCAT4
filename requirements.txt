@@ -1,0 +1,6 @@
+# What TurboCAT needs from Python's package index (pip install -r requirements.txt).
+# Helper programs (lha, xdms, 7z) and music libraries (libopenmpt, libxmp) come from the system:
+# Help › Check setup says what is missing and how to get it.
+PySide6==6.12.0
+amitools==0.9.0
+lhafile==0.3.1
