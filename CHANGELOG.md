@@ -5,7 +5,7 @@ Author: David Hill
 What changed in each release, newest first. Work not yet in a numbered release is under
 **Unreleased**.
 
-## 4.0.0-beta.1 — first public test release (not yet published)
+## 4.0.0-beta.1 — first public test release (14 November 2026)
 
 - **A welcome on the first start**: an empty catalogue shows "Welcome to TurboCAT 4" with one
   button, Choose your Amiga folder…, instead of an empty list. The setup report no longer opens over
