@@ -23,3 +23,10 @@ TurboCAT 4 and its source: https://github.com/davidhill99/TurboCAT4
 TurboCAT is free. If it's helped you: https://ko-fi.com/tcpturbocat
 Includes Keir Fraser's public-domain 68000 inflate (github.com/keirf/amiga-stuff).
 New and still being tested on real Amigas: reports are very welcome.
+
+Deutsch: TurboView ist die Amiga-Seite von TurboCAT 4 (Windows, macOS, Linux). Damit
+durchsuchst du deine Sammlung direkt auf dem Amiga (ab Kickstart 1.3) und findest heraus,
+welche Diskette bzw. welches Gotek-Image das gesuchte Spiel oder Programm enthaelt.
+TurboCAT erstellt dafuer zwei selbststartende TurboView-Disketten; Installation auf
+Festplatte mit: TurboView:TurboView INSTALL DH0:TurboCAT
+Berichte gerne auch auf Deutsch an tcpturbocat@gmail.com.

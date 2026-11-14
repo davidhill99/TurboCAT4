@@ -7,6 +7,9 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## 4.0.0-beta.1 — first public test release (not yet published)
 
+- **Auf Deutsch**: a German README (LIESMICH.md, linked at the top of the README) and German lines in
+  the Aminet readme. The README has a short history: the Amiga Shopper coverdisk (1995) and reviews
+  (85% and a 90% Star Buy, 1996), linked to the scans on the Internet Archive
 - **Support TurboCAT**: TurboCAT stays free; Help › Support TurboCAT 4… and a line in the About box
   open its Ko-fi page (ko-fi.com/tcpturbocat) in your browser. It is also in the README, the
   Aminet readme and GitHub's Sponsor button, and Help › Privacy says it sends nothing

@@ -2,6 +2,8 @@
 
 Author: David Hill
 
+*[Deutsch: LIESMICH.md](LIESMICH.md)*
+
 The scanning engine for TurboCAT 4, the modern revival of TurboCAT /
 TurboCAT-Pro (1994–1996). Version 4 continues the original numbering: TurboCAT 3 was
 on the Amiga Shopper issue 52 coverdisk in August 1995. This preview runs from the terminal, with a first
@@ -116,6 +118,19 @@ tc window                  # desktop window: the catalogue with search (Ctrl F)
 Run the commands from inside the `TurboCAT4` folder.
 
 The catalogue is stored in `~/turbocat.db` (change with `--db FILE`).
+
+## A bit of history
+
+TurboCAT was written in CanDo between 1994 and 1996, and the UK magazine *Amiga Shopper* featured it
+three times (scans on the Internet Archive):
+
+- **August 1995, issue 52:** TurboCat 3 as an exclusive version on the coverdisk, already with
+  TurboView as its "companion program" for searching the collection.
+  [Page 6](https://archive.org/details/Amiga_Shopper_Issue_52_1995-08_Future_Publishing_GB/page/n5/mode/2up)
+- **February 1996, issue 59:** TurboCAT-Pro 1.2 reviewed, **85%**.
+  [Pages 76–77](https://archive.org/details/Amiga_Shopper_Issue_59_1996-02_Future_Publishing_GB/page/n75/mode/2up)
+- **May 1996, issue 62:** TurboCAT-Pro 2 reviewed, **90% and a Star Buy**: "my favourite cataloguer".
+  [Pages 70–71](https://archive.org/details/Amiga_Shopper_Issue_62_1996-05_Future_Publishing_GB/page/n69/mode/2up)
 
 ## Licence and contact
 
