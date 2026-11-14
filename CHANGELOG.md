@@ -7,6 +7,116 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## Unreleased
 
+- **TurboView on a real Amiga fits the screen**: its explanation scrolls and its result line and
+  buttons stay at the bottom, instead of the window growing taller than a 900-pixel screen
+- **TurboView's icons are Workbench 2 icons**: marked revision 1 (as 2.04 and 3.1 make them), so
+  TurboCAT draws a scanned TurboView disk as a Workbench 2 window (grey, with the cat in blue), not
+  in 1.3 colours. Disk and drawer icons carry Workbench 2's view settings; Workbench 1.3 still reads them
+- **A copier screen when TurboCAT writes disks**: the TurboView disks, Copy to Gotek stick (one disk
+  or a batch) and repaired/tidied copies (including Fix all) now show each disk filling in, cylinder
+  by cylinder (side 0 above side 1), coloured by what is really on each track (files, headers,
+  folders, the disk's index, empty, blank, bad, not DOS), with the drive's step clicks, seeks and
+  motor hum (made by TurboCAT, no recordings). Sound on/off and Fast (skips the picture) are
+  remembered; Stop stops the writing. It never slows the writing: disks are handed over as they are
+  written, and it speeds up when they come faster than it draws them
+- **Help › How TurboView went on your Amiga…** (and a button in TurboView on a real Amiga): a short
+  form for testers. The hard-drive install is marked experimental: meant for an A1200 or any Amiga
+  with Kickstart 2.04+; a 1.3 A500 gets the Shell version and the install there is untested
+- **Updating TurboView after the next scan is one click** (TurboView 4.0 alpha 6): an installed
+  TurboView notices newer TurboView disks in a drive (at start, or when a disk goes in) and offers
+  "Update now?"; the Shell version says so and takes `update`. Fixes to the install, which an update
+  re-runs: the new list of files is always unpacked (before, a second install kept the old one), the
+  icon's tooltypes and position are kept, a copy of TurboView in WBStartup is updated too, and an old
+  search index is removed if disk 2 isn't there. On a Gotek with numbered images, new TurboView disks
+  replace the old ones' slots instead of taking new numbers
+- **TurboView is a Workbench tool again, like the original** (TurboView 4.0 alpha 5): the floppies
+  have Workbench icons (disk, TurboView, ReadMe), so with Workbench running you can insert one and
+  double-click TurboView to keep it open beside your work; it reads its icon's tooltypes
+  (CATALOGUE=, SCREEN=, FAVOURITES), and otherwise the drawer it is in; problems show in a
+  requester. A zoom gadget shrinks its window to the title bar. INSTALL gives the hard drive a
+  drawer icon and a TurboView icon with CATALOGUE= set, ready to drag into WBStartup
+- **Two TurboView floppies, and a hard-drive install from them** (TurboView 4.0 alpha 4). Disk 1
+  ("TurboView") has your disks and what is on each; disk 2 ("TurboView2") has a name index
+  (TurboCAT.nix: every file and folder name once, with its disks), so searching every file name
+  unpacks a third as much: about 1½ minutes on an A500 at real floppy speed instead of ~4¾. Each disk
+  works alone; with both in two drives TurboView uses each for what it does best, without
+  "insert disk" requesters. `TurboView:TurboView INSTALL DH0:TurboCAT` copies both disks to a hard
+  drive and unpacks the full list there (searches and contents then quick). Tools › TurboView on a
+  real Amiga makes both disks (or copies both to the Gotek stick) and explains the install.
+  **Not yet tried on a real Amiga**: docs/testing-turboview-on-a-real-amiga.md is the tester checklist
+- **TurboView's file search on a floppy stops once its list is full** (300 in the window, 20 in the
+  Shell) and says there are more on later disks, instead of unpacking everything to count them:
+  common names (startup-sequence) now take seconds rather than minutes on an A500. One disk with a
+  huge file list can no longer stop the packed list opening (each disk is capped at 64 KB, with a note)
+- **The TurboView floppy carries the list of every file, packed** (TurboCAT.fz, standard deflate in
+  32 KB blocks, ~4.1 MB -> ~520 KB) when it won't fit as it is, so TurboView on a real Amiga shows
+  each disk's contents (one block unpacked: seconds). Searching every file name from the floppy is
+  slow (minutes on an A500 or A1200), so it shows how far it has got and stops on a click, a key or
+  Ctrl-C. TurboView 4.0 alpha 3 also hides the "PC:" line when there's no computer path. TurboView
+  unpacks with Keir Fraser's 68000 inflate in assembly (amiga/inflate.asm, public domain): a full
+  file-name search from the floppy takes about 2½ minutes of unpacking on an A500 (about 4¾ with a
+  real-speed drive), three times faster than portable C
+- **TurboView's file list leaves out looping-directory junk**: a damaged disk whose directory loops
+  back on itself made the scan record nonsense paths hundreds of folders deep (one disk added 1.2 MB).
+  Paths over 16 folders deep or 255 characters are left out, with one line saying how many
+- **The TurboView floppy is much smaller and carries no personal paths**: its main list drops the
+  computer's own paths (meaningless on a real Amiga), so it shrinks by two thirds (about 500 KB to
+  217 KB on a 1,700-item collection), leaving room for more
+- **Tools › TurboView on a real Amiga…**: explains the two ways to get TurboView onto a real Amiga
+  and makes what each needs. (1) A TurboView floppy, TurboView.adf, that starts TurboView by itself
+  on any Amiga (Kickstart 1.3 or later), saved anywhere or copied straight to the Gotek stick (as
+  DSKAnnnn.ADF on a numbered stick); the list of every file goes on only if it fits. (2) The full
+  files for a hard drive, with how to get them across (FAT card with fat95, network, or the floppy)
+  and how to start it. Booted in FS-UAE as an A1200 (window) and an A500 with 1.3 (Shell)
+- **TurboView is explained as running on a real Amiga too**, not only in an emulator: the toolbar
+  button, the Tools menu, Check setup and the README say it lists and searches your collection on
+  an Amiga (to find which disk or Gotek image holds what), and how to copy it to a real one. Without
+  an emulator, Check setup now shows TurboView as working on a real Amiga instead of missing
+- **Privacy statement**: Help › Privacy, a Privacy link in the feedback forms, and PRIVACY.md (linked
+  from the README). It says what TurboCAT contacts online and what it sends (only when you use those
+  features), what it never does, and what it keeps on your computer. All three come from one text
+  (privacy.py); a test fails if PRIVACY.md falls out of step, or if the code contacts a site the
+  statement doesn't name
+- **The suggestion box is easy to find**: a "Got an idea?" link always in the status bar, a
+  "Suggest an idea…" button in About, and one reminder (only ever one) after the tenth start: a
+  small note above the link, shown when nothing else is open and TurboCAT isn't busy
+- **Error reports' kill switch**: the error box has "Don't show these again", and Help › Show error
+  reports turns them off or on. TurboCAT also pauses them by itself for the rest of the session when
+  they come too often (3 boxes, or 20 errors, in 10 minutes). When they are switched off after real
+  errors, it offers once to report why: how many errors, which kinds, how often and where in the
+  code. Nothing is sent unless the tester chooses to
+- **Help › Report a problem… / Suggest an idea…**: a short form whose report opens as a new GitHub
+  issue with the technical details filled in (TurboCAT, Python and Qt versions, the system, what
+  Check setup found, the catalogue's size). The exact text is shown first; the home folder and user
+  name are taken out; no file lists or catalogue are sent. Copy details is for anyone without a
+  GitHub account. Issue forms for both are in .github/ISSUE_TEMPLATE
+- **Crash catcher**: an unexpected error now shows "TurboCAT hit a problem" (once per kind of
+  error) with Report it…, Copy details and Carry on, instead of only printing to the console
+- **Rename files to their proper names** no longer offers the same renames every time: a spare
+  copy of a disk whose properly named file is already in the folder is left as it is (and said so),
+  instead of failing quietly on each run. ROMs no longer get ".rom.rom"; ROMs already renamed that
+  way are offered the single ".rom"
+- **Tools › Look on Aminet for missing files…**: damaged files that none of your disks have are
+  looked for on Aminet (freely distributable software only, Fred Fish disks included). Only a file
+  with exactly the same name and size is downloaded, and only that file is kept
+  (~/.cache/turbocat/aminet); each name is looked up once. Commodore's own files and names too
+  plain to search for ("1", "d") are never looked for. Fix all then uses what was found; repaired
+  copies say "from Aminet <package>" in their note and in repairs.csv
+- The window can be maximised again after a scan: the result message in the progress bar wraps
+  onto more lines, and the "Inside archive…" line shortens with …, rather than making the window
+  wider than the screen (which made the desktop drop the maximise button)
+- TurboView in FS-UAE shows its whole screen: FS-UAE cut off part of TurboView's 1280x512
+  super-hires screen, so in FS-UAE TurboView now opens a 640x512 one (Amiberry keeps the sharper
+  super-hires screen)
+
+- Disk map: the details panel shows every block of a floppy as X-Copy did, 80 cylinders across with
+  side 0 above side 1: boot, root, bitmap, folders, file headers and lists, file data, blocks in a
+  damaged file, bad blocks (checksum wrong), free and blank blocks, or a non-DOS disk's own data.
+  Hover over a square for its cylinder, side, sector and the file it belongs to
+- Tools › Collection stats…: a league table of the groups that cracked, trained, fixed and hacked
+  your disks (TOSEC's short names such as SR and FLT shown in full), your publishers, and a chart of
+  disks by year. Double-click a group or publisher to find its disks
+
 - Disks whose files all read but whose index (directory) has errors say so plainly ("The disk's
   index has 2 small errors — every file still reads"), with the technical findings on hover, and
   offer "Make a tidied copy…": the same files in a fresh disk with a correct index, checked file by

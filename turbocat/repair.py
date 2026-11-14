@@ -1,5 +1,6 @@
 """Make repaired copy (repair R4): rebuild a damaged floppy from its readable files plus intact
-copies of its damaged files found on other disks in the collection.
+copies of its damaged files found on other disks in the collection, or (once looked up, see
+aminet.py) freely distributable copies found on Aminet.
 
 The original image is only read, never changed. The repaired copy is a NEW disk image, written to
 its own folder (~/TurboCAT/Repaired), and is always marked as not an original dump:
@@ -27,7 +28,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from . import VERSION, bootblock, explain, gotek
+from . import VERSION, aminet, bootblock, explain, gotek
 
 REPAIRED_DIR = os.path.expanduser("~/TurboCAT/Repaired")
 LOG = os.path.expanduser("~/.local/share/turbocat/repairs.csv")
@@ -48,6 +49,16 @@ class Source:
     path: str            # the file's path there
     sha1: str
     date: str = ""
+    online: str = ""     # found on Aminet: the package it came from ("misc/fish/fish-0786.lha")
+
+    @property
+    def label(self):
+        """Where it came from, for people: '#0215 Disk.adf' or 'Aminet misc/fish/fish-0786.lha'."""
+        return f"Aminet {self.online}" if self.online else f"#{self.number:04d} {self.name}"
+
+    @property
+    def short(self):
+        return "Aminet" if self.online else f"#{self.number:04d}"
 
 
 @dataclass
@@ -197,6 +208,9 @@ def plan(cat, top_id, ix=None):
                 item.sources.append(Source(f["media_id"], t["number"] or 0,
                                            os.path.basename(t["source"].rstrip("/")),
                                            f["path"], f["sha1"], f["date"] or ""))
+        if item.size and not item.sources:          # found on Aminet earlier (from the cache only)
+            for h in aminet.hits(item.name, item.size):
+                item.sources.append(Source(0, 0, "Aminet", h.inner, h.sha1, h.date, online=h.package))
         _judge(item)
         lost.append(item)
     total = cat.db.execute("SELECT COUNT(*) FROM files WHERE media_id=? AND NOT is_dir",
@@ -216,7 +230,8 @@ def _judge(item):
         return
     if len(by_sha) == 1:
         group = next(iter(by_sha.values()))
-        same_date = item.date and any(s.date == item.date for s in group)
+        same_date = item.date and any(s.date == item.date or (s.online and s.date == item.date[:10])
+                                      for s in group)
         item.use = group[0]
         item.confidence = "strong" if len({s.number for s in group}) > 1 or same_date else "likely"
         return
@@ -240,6 +255,10 @@ def plan_all(cat, top_ids=None):
             log_stamp = os.path.getmtime(LOG)
         except OSError:
             log_stamp = None
+        try:                                   # files found on Aminet change the plans too
+            log_stamp = (log_stamp, os.path.getmtime(aminet.LOOKUPS))
+        except OSError:
+            pass
         stamp = (getattr(cat, "path", id(cat)), tuple(cat.db.execute(
             "SELECT COUNT(*), MAX(id), MAX(scanned_at) FROM media").fetchone()), log_stamp)
         if _plans.get("stamp") != stamp:
@@ -358,7 +377,9 @@ def _node(vol, path):
 
 
 def read_source(cat, src):
-    """The replacement file's bytes, checked against the catalogue."""
+    """The replacement file's bytes, checked against the catalogue (or the Aminet cache)."""
+    if src.online:
+        return aminet.read_hit(aminet.Hit(src.sha1, src.online, src.path, src.date))
     m = cat.media_by_id(src.media_id)
     data = _take(_media_bytes(cat, src.media_id), m["kind"], src.path)
     if hashlib.sha1(data).hexdigest() != src.sha1:
@@ -386,7 +407,8 @@ def build(cat, p, out_dir=None, with_unsure=False, mark=True, log=None):
     for path, x in list(use.items()):
         # any copy with the same checksum will do: plain disks first, then the one picked
         same = sorted((s for s in x.sources if s.sha1 == x.use.sha1),
-                      key=lambda s: (cat.media_by_id(s.media_id)["kind"] not in FLOPPY, s is not x.use))
+                      key=lambda s: (bool(s.online) or cat.media_by_id(s.media_id)["kind"] not in FLOPPY,
+                                     s is not x.use))
         why = ""
         for s in same:
             try:
@@ -450,7 +472,7 @@ def build(cat, p, out_dir=None, with_unsure=False, mark=True, log=None):
                 x = use[path]
                 comment = mi.get_comment()
                 if mark and (comment is None or not comment.get_unicode()):
-                    comment = FSString(f"Restored by TurboCAT {today} from #{x.use.number:04d}"[:79])
+                    comment = FSString(f"Restored by TurboCAT {today} from {x.use.short}"[:79])
                 mi = MetaInfo(protect=mi.get_protect(), mod_ts=mi.get_mod_ts(), comment=comment)
                 taken[name.lower()] = data_for[path]
                 dst_dir.create_file(FSString(name), data_for[path], meta_info=mi, update_ts=False)
@@ -532,9 +554,10 @@ def _marker_text(p, restored, missing, notes):
         "It is NOT an original dump.",
         "",
         "Original: " + p.source_file,
-        f"{len(restored)} damaged file(s) were replaced with copies found on other disks:",
+        f"{len(restored)} damaged file(s) were replaced with copies found on other disks"
+        + (" or on Aminet (freely distributable):" if any(x.use.online for x in restored) else ":"),
     ]
-    lines += [f"  {x.path}  from #{x.use.number:04d} {x.use.name}" for x in restored]
+    lines += [f"  {x.path}  from {x.use.label}" for x in restored]
     if missing:
         lines += ["", "Still damaged, left out:"] + [f"  {x.path}" for x in missing]
     if notes:
@@ -560,7 +583,7 @@ def _log(log, p, path, sha, restored, missing=()):
             w.writerow(["date", "original", "repaired copy", "repaired sha1", "file", "from", "file sha1"])
         for x in restored:
             w.writerow([datetime.date.today().isoformat(), p.source_file, path, sha, x.path,
-                        f"#{x.use.number:04d} {x.use.name}", x.use.sha1])
+                        x.use.label, x.use.sha1])
         if p.tidy:                   # nothing replaced: one line saying what was done
             w.writerow([datetime.date.today().isoformat(), p.source_file, path, sha,
                         "(the disk's index)", TIDIED, ""])
@@ -574,6 +597,8 @@ TIDIED = "rebuilt by TurboCAT"         # the log's "from" for a tidied copy
 FINISH_IT = ("To fix it fully, either:\n"
              "• get a good copy of the disk. Free disks (public domain, freeware, shareware) are "
              "usually on Aminet or the Internet Archive; or\n"
+             "• Tools › Look on Aminet for missing files: freely distributable files with exactly "
+             "the same name and size are downloaded and used; or\n"
              "• put disks that have the missing files in a folder TurboCAT scans, and press F5. The "
              "disk will then say \u201cCan be fully rebuilt now\u201d, and Fix all can make a complete copy.")
 

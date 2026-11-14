@@ -1,0 +1,35 @@
+# TurboCAT privacy statement
+
+Last updated 13 November 2026.
+
+TurboCAT collects nothing about you. There are no accounts, no analytics, no tracking and no usage statistics. Your disk images, your file lists and your catalogue never leave your computer.
+
+## What TurboCAT sends over the internet
+
+Only when you use these features:
+
+| Feature | Contacts | What it sends |
+|---|---|---|
+| Find pictures online | GitHub (the libretro-thumbnails collection) and the Internet Archive | The titles of games and the names of magazines it looks up. Once you switch it on, new disks are looked up after each scan; Tools › Find pictures online is where it starts. |
+| Identify disks online | tosecdev.org and GitHub (the libretro database) | Nothing about your disks: it downloads the whole list of known Amiga disks and matches the checksums on your computer. |
+| Look on Aminet for missing files | aminet.net | The names of the damaged files it looks for. It downloads only files with exactly the same name and size. |
+| Report a problem, Suggest an idea | GitHub, through your own web browser | Only what the form shows you under “What will be sent”, and only if you submit it there. Your home folder is shown as ~ and your user name is taken out first. |
+
+## What it never does
+
+- Nothing is sent in the background unless you started it (or switched it on, as with pictures).
+- No disk images, file lists, catalogue or checksums are sent anywhere.
+- Error reports are never sent by themselves: TurboCAT shows you the report and you decide.
+
+## What it keeps, all on your computer
+
+- **Your catalogue**: where you chose (normally ~/turbocat.db), with safety copies in a folder beside it
+- **Pictures, disk lists and Aminet files it downloaded**: ~/.cache/turbocat
+- **Logs of repaired copies and renamed files**: ~/.local/share/turbocat
+- **Repaired and tidied copies of disks**: ~/TurboCAT/Repaired
+
+All of it stays on your computer. Delete any of these folders and TurboCAT starts afresh.
+
+## Reports on GitHub
+
+Reports filed on GitHub are public on TurboCAT's GitHub page, and GitHub keeps them under its own privacy policy, not TurboCAT's. Anything you send by email instead goes only to whoever you send it to.

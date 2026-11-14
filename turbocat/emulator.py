@@ -510,7 +510,7 @@ def turboview_command(emulator, base, rom, folder, roots, display="window"):
         return cmd
     os.makedirs(FSUAE_DIR, exist_ok=True)
     cmd = list(base) + [f"--base_dir={FSUAE_DIR}", "--amiga_model=A1200", "--floppy_drive_count=2", "--fast_memory=8192",
-                        "--uae_cpu_speed=max", "--uae_gfx_resolution=superhires",
+                        "--uae_cpu_speed=max",                 # TurboView opens 640x512 here (SCREEN=HIGH)
                         f"--hard_drive_0={folder}", "--hard_drive_0_label=TurboCAT"] + display_args(emulator, display)
     if rom:
         cmd.append(f"--kickstart_file={rom}")

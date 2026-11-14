@@ -291,7 +291,7 @@ def several_disks(first, names):
 
 def stem(name):
     """A TOSEC rom name without its extension."""
-    return re.sub(r"\.(adf|adz|dms|ipf|zip|lha|exe)$", "", name, flags=re.I)
+    return re.sub(r"\.(adf|adz|dms|ipf|zip|lha|exe|rom|bin)$", "", name, flags=re.I)
 
 
 def guess(path):
@@ -306,23 +306,42 @@ def guess(path):
 
 # ---------------------------------------------------------------- renaming files
 
-def rename_plan(items):
+def rename_plan(items, spares=None):
     """[(item, current path, new path)] for identified items whose file name differs from the
-    TOSEC name. The extension of the actual file is kept (a ZIP stays a .zip)."""
-    plan, taken = [], set()
+    TOSEC name. The extension of the actual file is kept (a ZIP stays a .zip), never doubled
+    (a ROM becomes "….rom", not "….rom.rom").
+    A file whose proper name is already taken by another file (an identical spare copy, usually)
+    is left as it is, and listed in spares, if given, as (item, current path, the name taken)."""
+    wanted = []
     for it in items:
         name = getattr(it, "tosec_name", "")
         if not name or it.type in ("Folder",) or not os.path.isfile(it.path):
             continue
         folder, current = os.path.split(it.path)
         ext = os.path.splitext(current)[1]
-        new = _safe(stem(name)) + ext
-        target = os.path.join(folder, new)
-        if new == current or target in taken:
+        base = _safe(stem(name))
+        new = base if ext and base.lower().endswith(ext.lower()) else base + ext
+        if new == current:
+            continue
+        wanted.append((it, it.path, os.path.join(folder, new), current))
+    # a file already close to its proper name (only its extension wrong) goes first
+    wanted.sort(key=lambda w: not w[3].lower().startswith(os.path.splitext(os.path.basename(w[2]))[0].lower()))
+    plan, taken = [], set()
+    for it, path, target, current in wanted:
+        if target in taken or (os.path.exists(target) and not _same_file(target, path)):
+            if spares is not None:
+                spares.append((it, path, target))
             continue
         taken.add(target)
-        plan.append((it, it.path, target))
+        plan.append((it, path, target))
     return plan
+
+
+def _same_file(a, b):
+    try:
+        return os.path.samefile(a, b)          # a change of case only, on a case-blind disk
+    except OSError:
+        return False
 
 
 def _safe(name):

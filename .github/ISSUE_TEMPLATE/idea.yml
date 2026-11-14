@@ -1,0 +1,21 @@
+name: Suggest an idea
+description: Something you'd like TurboCAT to do
+title: "[Idea] "
+labels: ["idea", "to sort"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it would help
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: TurboCAT's version and your system (filled in by TurboCAT)
+      render: text

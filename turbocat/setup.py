@@ -192,7 +192,8 @@ def run(emulators=None, kickstarts=None, music_versions=None):
 
     # TurboView and the optional online parts
     ok = os.path.exists(turboview.PROGRAM)
-    out.append(Check("TurboView", "The Amiga side of TurboCAT, run inside the emulator",
+    out.append(Check("TurboView", "The Amiga side of TurboCAT: search your collection on an emulated "
+                     "or a real Amiga",
                      OK if ok else MISSING, "included" if ok else "",
                      without="" if ok else "The TurboView button",
                      advice="" if ok else "Build it from amiga/turboview.c (see the README).",
@@ -309,10 +310,10 @@ def features(checks, imp=None, roms=None):
                            ["Amiga emulator", "Kickstart ROMs"], detail="\n".join(gaps)))
 
     tv = ok("TurboView")
-    out.append(Feature("TurboView", OK if emu and tv else MISSING,
-                       "Starts an emulated Amiga with your collection" if emu and tv else
-                       "Needs " + " and ".join(x for x, have in (("an Amiga emulator", emu),
-                                                                 ("the TurboView program", tv)) if not have),
+    out.append(Feature("TurboView", OK if emu and tv else PARTIAL if tv else MISSING,
+                       "Search your collection on an emulated or a real Amiga" if emu and tv else
+                       "Works on a real Amiga; starting it here needs an Amiga emulator" if tv else
+                       "Needs the TurboView program",
                        ["Amiga emulator", "TurboView"], important=False))
 
     out.append(Feature("Copying to a Gotek stick", OK if ok("xdms") or not n("dms") else PARTIAL,
@@ -426,11 +427,21 @@ def guide(name):
             "Where Kickstart files go: any folder you scan (TurboCAT recognises ROMs by their "
             "contents, whatever they're called), or one of these:\n" + roms + found),
         "TurboView": (
-            "What it does: starts an emulated A1200 running TurboView, the Amiga side of TurboCAT, with "
-            "your collection folders as drives.",
-            "What to do: needs an emulator and a Kickstart 3.x ROM (see Playing disks in an emulator).",
-            "Where files go: TurboView's own files are written to ~/Amiberry/HardDrives/TurboCAT if you "
-            "have an Amiberry folder, otherwise ~/TurboCAT-Amiga."),
+            "What it does: TurboView is the Amiga side of TurboCAT. It lists and searches your whole "
+            "collection on an Amiga, so you can find what is on each disk and which disk or Gotek "
+            "image holds the game or tool you want. The TurboView button starts it in an emulated "
+            "A1200 with your collection folders as drives; there it can also put a disk straight "
+            "into a drive.",
+            "What to do: in an emulator, it needs an emulator and a Kickstart 3.x ROM (see Playing "
+            "disks in an emulator). On a real Amiga: Tools › TurboView on a real Amiga… makes two "
+            "TurboView floppies that start by themselves (disk 1: your disks and what is on each; "
+            "disk 2: quick searches of every file name), for a Gotek or real floppies, and says how to "
+            "install them on a hard drive (TurboView INSTALL DH0:TurboCAT), with its own Workbench icon "
+            "to keep it handy. It runs on Kickstart 1.3 and later (as a window from 2.04). Make them "
+            "again after a scan, so it knows about new disks.",
+            "Where files go: TurboView's folder is ~/Amiberry/HardDrives/TurboCAT if you have an "
+            "Amiberry folder, otherwise ~/TurboCAT-Amiga. TurboCAT keeps TurboCAT.cat there up to "
+            "date."),
         "Copying to a Gotek stick": (
             "What it does: copies disks to a USB stick for a Gotek floppy emulator, with their own names "
             "or numbered DSKA0000.ADF, DSKA0001.ADF… (for FlashFloppy's numbered mode).",

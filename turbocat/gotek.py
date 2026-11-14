@@ -242,9 +242,10 @@ def next_index(dest):
     return i
 
 
-def copy_disks(cat, disks, dest, numbered=False, progress=None, stop=lambda: False):
+def copy_disks(cat, disks, dest, numbered=False, progress=None, stop=lambda: False, written=None):
     """Write each Disk to dest. Returns (copied [(disk, file name)], failed [(disk, reason)],
-    already there [(disk, file name)])."""
+    already there [(disk, file name)]). written(disk, file name, adf bytes) is called after each
+    disk is written (the copier screen shows it)."""
     copied, failed, same = [], [], []
     index = next_index(dest) if numbered else 0
     for i, d in enumerate(disks):
@@ -282,6 +283,8 @@ def copy_disks(cat, disks, dest, numbered=False, progress=None, stop=lambda: Fal
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(target + ".part", target)
+            if written:
+                written(d, name, adf)
         except OSError as ex:
             try:
                 os.remove(target + ".part")

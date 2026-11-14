@@ -82,6 +82,30 @@ class IdentifyTest(unittest.TestCase):
         self.assertEqual(len(plan), 1)
         self.assertEqual(os.path.basename(plan[0][2]), name + ".zip")
 
+    def test_rename_plan_leaves_spare_copies_and_never_doubles_the_extension(self):
+        folder = self.tmp.name
+        name = "Kickstart v3.1 r40.068 (1993-12)(Commodore)(A1200)[!].rom"
+        paths = [os.path.join(folder, n) for n in ("KS31 A1200.rom", "KS31 A1200 (1).rom")]
+        for p in paths:
+            open(p, "w").close()
+        items = [SimpleNamespace(path=p, type="ROM", tosec_name=identify.stem(name)) for p in paths]
+        spares = []
+        plan = identify.rename_plan(items, spares)
+        self.assertEqual([os.path.basename(t) for _, _, t in plan], [name])       # not .rom.rom
+        self.assertEqual(len(spares), 1)
+        os.rename(plan[0][1], plan[0][2])                 # the first run renamed one copy
+        items[[it.path for it in items].index(plan[0][1])].path = plan[0][2]
+        spares = []
+        self.assertEqual(identify.rename_plan(items, spares), [])     # nothing offered again
+        self.assertEqual(len(spares), 1)
+
+    def test_a_doubled_extension_from_before_is_put_right(self):
+        name = "Kickstart v2.04 r37.175 (1991-05)(Commodore)(A3000).rom"
+        p = os.path.join(self.tmp.name, name + ".rom")
+        open(p, "w").close()
+        plan = identify.rename_plan([SimpleNamespace(path=p, type="ROM", tosec_name=identify.stem(name))])
+        self.assertEqual(os.path.basename(plan[0][2]), name)
+
 
 if __name__ == "__main__":
     unittest.main()

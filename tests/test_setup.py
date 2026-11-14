@@ -96,8 +96,16 @@ class FeatureTest(unittest.TestCase):
     def test_no_emulator(self):
         f = self.feats(missing=("Amiga emulator",))
         self.assertEqual(f["Playing disks in an emulator"].status, setup.MISSING)
-        self.assertEqual(f["TurboView"].status, setup.MISSING)
+        # TurboView still runs on a real Amiga; only starting it here needs the emulator
+        self.assertEqual(f["TurboView"].status, setup.PARTIAL)
+        self.assertIn("real Amiga", f["TurboView"].effect)
         self.assertEqual(setup.overall(list(f.values())), setup.MISSING)
+
+    def test_turboview_guide_covers_a_real_amiga(self):
+        g = setup.guide("TurboView")
+        self.assertIn("On a real Amiga", g)
+        self.assertIn("TurboCAT.cat", g)
+        self.assertIn("Gotek", g)
 
 
 class BundledToolTest(unittest.TestCase):

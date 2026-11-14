@@ -1,0 +1,39 @@
+name: Report a problem
+description: Something in TurboCAT went wrong, or didn't do what you expected
+title: "[Problem] "
+labels: ["problem", "to sort"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. TurboCAT's **Help › Report a problem…** fills in this form for you.
+        Please don't attach disk images unless they're freely distributable.
+  - type: textarea
+    id: what
+    attributes:
+      label: What were you doing?
+      placeholder: e.g. Scanning my Amiga folder, then pressing Play
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: TurboCAT's version, your system and what Check setup found (filled in by TurboCAT)
+      render: text
+  - type: dropdown
+    id: data
+    attributes:
+      label: Did it change, lose or misname any of your files?
+      options:
+        - "No"
+        - "Not sure"
+        - "Yes"

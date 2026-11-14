@@ -9,7 +9,8 @@ from PySide6.QtGui import QGuiApplication, QImage  # noqa: E402
 
 from turbocat import amigaimg, madepics, utilities  # noqa: E402
 
-APP = QGuiApplication.instance() or QGuiApplication([])
+from PySide6.QtWidgets import QApplication  # noqa: E402  (a full one: other tests open windows)
+APP = QGuiApplication.instance() or QApplication([])
 
 
 def info(x, y):

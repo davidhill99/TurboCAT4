@@ -26,12 +26,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QFrame, QGridLayout, QLayout, QProgressDialog, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QRadioButton,
                                QButtonGroup, QHBoxLayout, QProgressBar,
-                               QHeaderView, QLabel, QLineEdit, QMainWindow, QPushButton,
+                               QHeaderView, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton,
                                QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
                                QTableView, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
 from . import APP_NAME, VERSION
-from . import explain, madepics, readers, repair
+from . import aminet, diskmap, drivesound, explain, feedback, privacy, madepics, readers, repair, stats
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
 from . import coverdisks, datlists, folders, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
@@ -1113,10 +1113,373 @@ def with_mark(widget, spacing=6):
     h = QHBoxLayout(box)
     h.setContentsMargins(0, 0, 0, 0)
     h.setSpacing(spacing)
-    h.addWidget(widget)
-    h.addWidget(HoverMark(widget), 0, Qt.AlignmentFlag.AlignVCenter)
-    h.addStretch(1)
+    wraps = isinstance(widget, QLabel) and widget.wordWrap()
+    h.addWidget(widget, 1 if wraps else 0)           # a wrapping line takes the width it's given
+    h.addWidget(HoverMark(widget), 0, Qt.AlignmentFlag.AlignTop if wraps else Qt.AlignmentFlag.AlignVCenter)
+    if not wraps:
+        h.addStretch(1)
     return box
+
+
+MAP_COLOURS = {
+    "boot": "#ff8800", "root": "#ffd400", "bitmap": "#b05fd0", "dir": "#4fa3e0", "header": "#2b6cb0",
+    "list": "#38b2ac", "data": "#48a868", "damaged": "#f6a03c", "bad": "#d93025", "used": "#8a8a8a",
+    "free": "#e4e7eb", "blank": "#c4c8ce", "nondos": "#5b8a8a",
+}
+
+
+# ---------------------------------------------------------------- the copier screen
+
+# What a track shows, most telling first: a track with a bad block is bad, whatever else is on it
+TRACK_ORDER = ["bad", "damaged", "nondos", "boot", "root", "bitmap", "dir", "header", "list", "data",
+               "used", "blank", "free"]
+TRACK_LEGEND = [("data", "Files"), ("header", "File headers"), ("dir", "Folders"), ("root", "Disk's index"),
+                ("free", "Empty"), ("blank", "Blank"), ("bad", "Bad"), ("nondos", "Not DOS")]
+
+
+def track_kinds(adf):
+    """160 track kinds (cylinder 0 side 0, cylinder 0 side 1, ...) from an ADF's real contents."""
+    try:
+        m = diskmap.build(adf)
+    except Exception:
+        return ["used"] * 160
+    out = []
+    for t in range(160):
+        kinds = set(m.kind[t * m.sectors:(t + 1) * m.sectors])
+        out.append(next((k for k in TRACK_ORDER if k in kinds), "used"))
+    return out
+
+
+class TrackGrid(QWidget):
+    """80 cylinders across, side 0 above side 1: tracks fill in as they are written."""
+
+    def __init__(self):
+        super().__init__()
+        self.kinds = [None] * 160            # None: not written yet
+        self.head = -1
+        self.setMinimumHeight(86)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        f = data_font(9)
+        p.setFont(f)
+        label_w = QFontMetrics(f).horizontalAdvance("Side 0") + 8
+        cw = max(3, (self.width() - label_w - 2) // 80)
+        ch = 22
+        top = 18
+        p.setPen(C["ink-muted"])
+        for cyl in range(0, 80, 10):
+            p.drawText(label_w + cyl * cw, 12, str(cyl))
+        for side in range(2):
+            y = top + side * (ch + 6)
+            p.setPen(C["ink-muted"])
+            p.drawText(0, y + ch - 7, f"Side {side}")
+            for cyl in range(80):
+                t = cyl * 2 + side
+                k = self.kinds[t]
+                colour = QColor(MAP_COLOURS.get(k, "#8a8a8a")) if k else QColor("#3a3f47")
+                p.fillRect(label_w + cyl * cw, y, cw - 1, ch, colour)
+                if t == self.head:
+                    p.setPen(QColor("#ffffff"))
+                    p.drawRect(label_w + cyl * cw, y, cw - 2, ch - 1)
+        p.end()
+
+
+class CopierDialog(QDialog):
+    """Writing disks, as a copier showed it: each disk's tracks fill in, cylinder by cylinder, with
+    the drive's clicks, seeks and hum (Sound, remembered; muted with one click).
+
+    It only shows what is being written: each flow writes its disks as fast as it can and hands each
+    one over (add_disk) as it is done, so nothing waits for the picture. A disk takes a second or two
+    to fill in, quicker when disks are coming faster than that; Fast (remembered) skips it."""
+
+    stop_requested = Signal()
+    DISK_SECONDS = 1.6
+    TICK_MS = 16
+
+    def __init__(self, parent, cat, title="Writing disks", total=0):
+        super().__init__(parent)
+        self.cat = cat
+        self.setObjectName("dialog")
+        self.setWindowTitle(title)
+        self.setMinimumWidth(720)
+        self.queue, self.total, self.written, self.shown = [], total, 0, 0
+        self.finished_text = None
+        self.current = None
+        self.pos = 0.0
+        self.last_cyl = -1
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(8)
+        head = QLabel(title)
+        head.setFont(ui_font(18, QFont.Weight.Bold))
+        v.addWidget(head)
+        self.lines = []
+        for _ in range(3):
+            lab = QLabel(" ")
+            lab.setFont(data_font(13))
+            lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            v.addWidget(lab)
+            self.lines.append(lab)
+        self.grid = TrackGrid()
+        v.addWidget(self.grid)
+        # empty tracks are near-white: shown as an outline, so the key can be seen on a light window
+        legend = QLabel("   ".join((f"<span style='color:{C['ink-muted'].name()}'>□</span>" if k == "free" else
+                                    f"<span style='color:{MAP_COLOURS[k]}'>■</span>") + f"&nbsp;{w}"
+                                   for k, w in TRACK_LEGEND))
+        legend.setTextFormat(Qt.TextFormat.RichText)
+        legend.setObjectName("muted")
+        legend.setFont(ui_font(11))
+        v.addWidget(legend)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(6)
+        v.addWidget(self.bar)
+        self.summary = _wrap_label("", ui_font(12), "muted")
+        v.addWidget(self.summary)
+        row = QHBoxLayout()
+        self.fast = QCheckBox("Fast")
+        self.fast.setToolTip("Skip the track-by-track picture: each disk shows at once")
+        self.fast.setChecked(bool(cat.get_meta("copier_fast", False)))
+        self.fast.toggled.connect(lambda on: cat.set_meta("copier_fast", bool(on)))
+        self.sound_btn = QPushButton()
+        self.sound_btn.setCheckable(True)
+        self.sound_btn.setChecked(bool(cat.get_meta("drive_sound", True)))
+        self.sound_btn.toggled.connect(self._sound_toggled)
+        self.close_btn = QPushButton("Stop")
+        self.close_btn.clicked.connect(self._close_clicked)
+        row.addWidget(self.fast)
+        row.addWidget(self.sound_btn)
+        row.addStretch(1)
+        row.addWidget(self.close_btn)
+        v.addLayout(row)
+        self.sounds = {}
+        self._sound_toggled(self.sound_btn.isChecked())
+        self.timer = QTimer(self, interval=self.TICK_MS)
+        self.timer.timeout.connect(self._tick)
+        self._status()
+
+    # -- sound
+    def _sound_toggled(self, on):
+        self.cat.set_meta("drive_sound", bool(on))
+        self.sound_btn.setText("Sound: on" if on else "Sound: off")
+        self.sound_btn.setToolTip("The drive's clicks and hum while disks are written. Click to "
+                                  + ("mute" if on else "turn them on"))
+        if not on:
+            for snd in self.sounds.values():
+                snd.stop()
+        elif self.current is not None:
+            self._play("motor")
+
+    def _play(self, name):
+        if not self.sound_btn.isChecked():
+            return
+        try:
+            if not self.sounds:
+                from PySide6.QtMultimedia import QSoundEffect
+                for key, path in drivesound.files().items():
+                    snd = QSoundEffect(self)
+                    snd.setSource(QUrl.fromLocalFile(path))
+                    snd.setVolume({"motor": 0.35, "seek": 0.5, "step": 0.45}[key])
+                    if key == "motor":
+                        snd.setLoopCount(QSoundEffect.Loop.Infinite.value)
+                    self.sounds[key] = snd
+            snd = self.sounds[name]
+            if name == "motor" and snd.isPlaying():
+                return
+            snd.play()
+        except Exception:
+            self.sounds = {"step": _Silent(), "seek": _Silent(), "motor": _Silent()}
+
+    # -- feeding it
+    def add_disk(self, title, target, adf):
+        """A disk has just been written: show it. adf: its bytes (the image as written)."""
+        self.written += 1
+        self.queue.append((title, target, track_kinds(adf)))
+        self.total = max(self.total, self.written)
+        if self.current is None:
+            self._next()
+        self._status()
+
+    def finish(self, text):
+        """Everything has been written: say how it went (shown once the last disk has filled in)."""
+        self.finished_text = text
+        if self.current is None and not self.queue:
+            self._done()
+
+    # -- animation
+    def _next(self):
+        if not self.queue:
+            self.current = None
+            self.timer.stop()
+            for snd in self.sounds.values():
+                snd.stop()
+            if self.finished_text is not None:
+                self._done()
+            return
+        self.current = self.queue.pop(0)
+        self.shown += 1
+        self.pos = 0.0
+        self.last_cyl = -1
+        self.grid.kinds = [None] * 160
+        if self.fast.isChecked():
+            self.grid.kinds = list(self.current[2])
+            self.grid.head = -1
+            self.grid.update()
+            self._play("step")
+            self._status(cyl=79, side=1)
+            QTimer.singleShot(60, self._next)
+            return
+        self._play("seek")
+        self._play("motor")
+        self.timer.start()
+
+    def _tick(self):
+        backlog = len(self.queue)
+        seconds = max(0.25, self.DISK_SECONDS / (1 + backlog))
+        self.pos += 160 * self.TICK_MS / 1000 / seconds
+        upto = min(160, int(self.pos))
+        kinds = self.current[2]
+        for t in range(160):
+            self.grid.kinds[t] = kinds[t] if t < upto else None
+        self.grid.head = upto - 1 if upto < 160 else -1
+        cyl = max(0, upto - 1) // 2
+        if cyl != self.last_cyl and seconds >= 0.8:
+            self._play("step")              # one click per cylinder (not when racing through)
+        self.last_cyl = cyl
+        self.grid.update()
+        self._status(cyl=cyl, side=max(0, upto - 1) % 2)
+        if upto >= 160:
+            self.timer.stop()
+            QTimer.singleShot(120, self._next)
+
+    def _status(self, cyl=None, side=None):
+        if self.current is not None:
+            title, target, _ = self.current
+            self.lines[0].setText(f"Disk  {self.shown} of {max(self.total, self.shown)}  {title}")
+            self.lines[1].setText(f"To    {target}")
+            self.lines[2].setText(f"Cyl   {cyl:2d}   Side {side}" if cyl is not None else "Cyl    0   Side 0")
+        self.bar.setRange(0, max(1, self.total))
+        self.bar.setValue(self.written)
+
+    def _done(self):
+        self.timer.stop()
+        for snd in self.sounds.values():
+            snd.stop()
+        self.grid.head = -1
+        self.grid.update()
+        self.lines[2].setText("Done.")
+        self.summary.setText(self.finished_text or "")
+        self.close_btn.setText("Close")
+        self.close_btn.setObjectName("primary")
+        self.close_btn.style().unpolish(self.close_btn)
+        self.close_btn.style().polish(self.close_btn)
+
+    def _close_clicked(self):
+        if self.finished_text is None:
+            self.stop_requested.emit()
+            self.close_btn.setEnabled(False)
+            self.close_btn.setText("Stopping…")
+            return
+        self.accept()
+
+    def reject(self):                       # Esc or the window's close button
+        if self.finished_text is None:
+            self._close_clicked()
+            return
+        super().reject()
+
+    def done(self, r):
+        self.timer.stop()
+        for snd in self.sounds.values():
+            snd.stop()
+        super().done(r)
+
+
+class _Silent:
+    """Stands in for a sound when Qt can't play any (no sound device)."""
+    def play(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def isPlaying(self):
+        return False
+
+
+class DiskMapView(QWidget):
+    """X-Copy-style map of a floppy: one small square per block, 80 cylinders across, side 0's
+    sectors above side 1's. Hover over a square for what that block is and which file it's in."""
+
+    def __init__(self):
+        super().__init__()
+        self.map = None
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_map(self, m):
+        self.map = m
+        self.setFixedHeight(self._height())
+        self.update()
+
+    def _cell(self):
+        cols = 80
+        w = max(2, (self.width() - 2) // cols)
+        h = max(3, min(8, w + 2)) if self.map is None or self.map.sectors == 11 else max(2, w)
+        return w, h
+
+    def _height(self):
+        if self.map is None:
+            return 0
+        _, h = self._cell()
+        return 2 * self.map.sectors * h + 6 + 2
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.map is not None and self.height() != self._height():
+            self.setFixedHeight(self._height())
+
+    def _at(self, pos):
+        """The block under a point, or None."""
+        if self.map is None:
+            return None
+        w, h = self._cell()
+        cyl = int(pos.x() // w)
+        y = pos.y()
+        side_h = self.map.sectors * h
+        side = 0 if y < side_h else 1
+        y = y if side == 0 else y - side_h - 6
+        sector = int(y // h)
+        if not (0 <= cyl < 80 and 0 <= sector < self.map.sectors) or y < 0:
+            return None
+        n = (cyl * 2 + side) * self.map.sectors + sector
+        return n if n < self.map.blocks else None
+
+    def event(self, e):
+        if e.type() == QEvent.Type.ToolTip:
+            n = self._at(e.pos())
+            if n is None:
+                QToolTip.hideText()
+            else:
+                QToolTip.showText(e.globalPos(), self.map.describe(n), self)
+            return True
+        return super().event(e)
+
+    def paintEvent(self, _e):
+        if self.map is None:
+            return
+        p = QPainter(self)
+        w, h = self._cell()
+        cols = {k: QColor(v) for k, v in MAP_COLOURS.items()}
+        side_h = self.map.sectors * h
+        for n, kind in enumerate(self.map.kind):
+            cyl, side, sector = self.map.where(n)
+            x = cyl * w
+            y = sector * h + (0 if side == 0 else side_h + 6)
+            p.fillRect(x, y, max(1, w - 1), max(1, h - 1), cols.get(kind, QColor("#000000")))
+        p.end()
 
 
 class Note(QFrame):
@@ -1185,10 +1548,11 @@ class RepairDialog(QDialog):
         head.setFont(ui_font(16, QFont.Weight.DemiBold))
         v.addWidget(head)
         n = len(lost)
+        on = "on your other disks" + (" or on Aminet" if any(x.use.online for x in found) else "")
         if len(found) == n:
-            what = f"good copies of {'all ' + str(n) if n > 1 else 'it'} are on your other disks."
+            what = f"good copies of {'all ' + str(n) if n > 1 else 'it'} are {on}."
         else:
-            what = f"good copies of {len(found)} {'is' if len(found) == 1 else 'are'} on your other disks."
+            what = f"good copies of {len(found)} {'is' if len(found) == 1 else 'are'} {on}."
         intro = _wrap_label(
             f"{_esc(plan.source_file)}<br>has {n} damaged file{'s' if n != 1 else ''}; {what}",
             ui_font(13))
@@ -1207,8 +1571,12 @@ class RepairDialog(QDialog):
                 where = "not on your other disks: it will be left out"
             else:
                 disks = len({s.number for s in x.sources})
-                where = f"from #{x.use.number:04d} {x.use.name}"
-                if x.confidence == "strong":
+                where = f"from {x.use.label}"
+                if x.use.online:
+                    tip = ("Not on your other disks, but Aminet has a file with exactly the same name and "
+                           "size" + (" and date" if x.confidence == "strong" else "") + ", in a freely "
+                           "distributable package. TurboCAT downloaded it earlier.")
+                elif x.confidence == "strong":
                     tip = (f"Found on {disks} disks, all identical." if disks > 1 else
                            "Found on one disk, with the same file date as the damaged one.")
                 elif x.confidence == "likely":
@@ -1586,6 +1954,19 @@ class DetailsPanel(QFrame):
         self.tunes.itemActivated.connect(lambda it, _c: on_play and on_play(self.tune_rows, it.data(0, Qt.ItemDataRole.UserRole)))
         v.addWidget(self.tunes)
         self.tune_rows = []
+
+        self.map_label = QLabel("DISK MAP")
+        self.map_label.setObjectName("section")
+        self.map_label.setFont(lf)
+        self.map_label.setToolTip("Every block on the disk, as X-Copy showed it: 80 cylinders across, "
+                                  "side 0 above side 1. Hover over a square for what that block is.")
+        v.addWidget(with_mark(self.map_label))
+        self.map_view = DiskMapView()
+        v.addWidget(self.map_view)
+        self.map_legend = _wrap_label("", ui_font(12), "muted")
+        self.map_legend.setTextFormat(Qt.TextFormat.RichText)
+        v.addWidget(self.map_legend)
+        self._maps = {}               # disk sha1 -> DiskMap (drawing it again is quicker)
 
         self.contents_label = QLabel("CONTENTS")
         self.contents_label.setObjectName("section")
@@ -2282,6 +2663,8 @@ class DetailsPanel(QFrame):
 
         self._order_notes()
 
+        self._show_map(d)
+
         # Contents tree, or the disk's readable text when it has no files
         self.tree.clear()
         total = self._fill_tree(d, others)
@@ -2307,6 +2690,32 @@ class DetailsPanel(QFrame):
         self._fit_tree()
         self.stack.setCurrentWidget(self.page)
         self.page.verticalScrollBar().setValue(0)
+
+    def _show_map(self, d):
+        """The disk map, for a floppy (the item itself, or the one disk in its archive)."""
+        show = d is not None and d["kind"] in ("adf", "adz", "dms") and d["status"] != "empty"
+        m = None
+        if show:
+            key = d["sha1"] or f"id:{d['id']}"
+            m = self._maps.get(key)
+            if m is None:
+                try:
+                    adf = gotek.adf_bytes(self.cat, d["id"])
+                    m = diskmap.build(adf, explain.damaged_paths(_j(d["problems"], [])))
+                    if len(self._maps) > 200:
+                        self._maps.clear()
+                    self._maps[key] = m
+                except Exception:
+                    m = None
+        for wdg in (self.map_label.parentWidget(), self.map_view, self.map_legend):
+            wdg.setVisible(m is not None)
+        if m is None:
+            return
+        self.map_view.set_map(m)
+        counts = m.counts()
+        bits = [f"<span style='color:{MAP_COLOURS[k]}'>■</span>&nbsp;{_esc(label.split(' (')[0])} "
+                f"{counts[k]:,}" for k, label in diskmap.KINDS if counts.get(k)]
+        self.map_legend.setText(" &nbsp; ".join(bits))
 
     def _fill_tunes(self, item):
         self.tunes.clear()
@@ -2451,6 +2860,7 @@ class ScanStopped(Exception):
 class RepairWorker(QThread):
     """Builds repaired copies one after another, with its own database connection."""
     step = Signal(int, int, str)          # done, total, the disk being repaired
+    built = Signal(str, str)              # the copy's file, the original's name
     done = Signal(list, list)             # [repair.Result], [(plan, why it failed)]
 
     def __init__(self, db_path, plans, mark=True):
@@ -2467,12 +2877,59 @@ class RepairWorker(QThread):
                     break
                 self.step.emit(i, len(self.plans), f"#{p.number:04d} {p.source_file}")
                 try:
-                    made.append(repair.build(cat, p, mark=self.mark))
+                    res = repair.build(cat, p, mark=self.mark)
+                    made.append(res)
+                    self.built.emit(res.path, p.source_file)
                 except Exception as ex:
                     failed.append((p, str(ex)))
         finally:
             cat.db.close()
         self.done.emit(made, failed)
+
+
+class AminetWorker(QThread):
+    """Tools › Look on Aminet for missing files: looks up each damaged file that no disk in the
+    collection has, one at a time (aminet.py keeps every answer, so each is looked up once)."""
+    step = Signal(int, int, str)          # done, total, the file being looked for
+    done = Signal(int, int, bool)         # files looked for, files found, stopped
+
+    def __init__(self, db_path):
+        super().__init__()
+        self.db_path = db_path
+        self.stop_wanted = False
+
+    @staticmethod
+    def wanted(cat):
+        """{(name, size)} still worth looking up: no good copy in the collection, not Commodore's,
+        not too plain a name, not looked up already."""
+        out = set()
+        for p in repair.plan_all(cat).values():
+            for x in p.lost:
+                if (x.use is None and x.size and not aminet.worth_looking(x.name, x.size)
+                        and not aminet.looked(x.name, x.size)):
+                    out.add((x.name, x.size))
+        return sorted(out, key=lambda t: t[0].lower())
+
+    def run(self):
+        cat = Catalogue(self.db_path)
+        looked = found = 0
+        try:
+            todo = self.wanted(cat)
+            fetcher = aminet.Fetcher()
+            for i, (name, size) in enumerate(todo):
+                if self.stop_wanted:
+                    break
+                self.step.emit(i, len(todo), name)
+                try:
+                    hits = aminet.look_up(name, size, fetcher, stop=lambda: self.stop_wanted)
+                except Exception:
+                    continue                  # no answer (offline?): tried again next time
+                if not self.stop_wanted:
+                    looked += 1
+                    found += bool(hits)
+        finally:
+            cat.db.close()
+        self.done.emit(looked, found, self.stop_wanted)
 
 
 class FixAllDialog(QDialog):
@@ -2518,7 +2975,7 @@ class FixAllDialog(QDialog):
             it.setCheckState(Qt.CheckState.Checked if p.complete() or not full else Qt.CheckState.Unchecked)
             it.setToolTip("\n".join(
                 f"{'✓' if x in p.usable() else '✗'} {x.path}"
-                + (f"  from #{x.use.number:04d} {x.use.name}" if x in p.usable() else
+                + (f"  from {x.use.label}" if x in p.usable() else
                    "  (several different versions: left out)" if x.confidence == "unsure" else
                    "  (not on your other disks: left out)")
                 for x in p.lost))
@@ -3180,6 +3637,7 @@ def _mb(n):
 
 class CopyWorker(QThread):
     progress = Signal(int, int, str)
+    written = Signal(str, str, bytes)       # disk name, file name on the stick, the ADF as written
     done = Signal(object)
     failed = Signal(str)
 
@@ -3194,7 +3652,8 @@ class CopyWorker(QThread):
             result = gotek.copy_disks(
                 cat, self.disks, self.dest, self.numbered,
                 progress=lambda i, n, d: self.progress.emit(i, n, d.name if d else ""),
-                stop=lambda: self.stop_wanted)
+                stop=lambda: self.stop_wanted,
+                written=lambda d, name, adf: self.written.emit(d.name, name, adf))
             self.done.emit(result)
         except Exception as ex:
             self.failed.emit(str(ex))
@@ -3402,6 +3861,11 @@ class GotekDialog(QDialog):
         self.bar.show()
         self.status.show()
         self.worker = CopyWorker(self.db_path, self.plan.disks, self.dest, numbered)
+        stick = os.path.basename(self.dest.rstrip("/")) or self.dest
+        self.copier = CopierDialog(self, self.cat, "Copying to the Gotek stick", total=len(self.plan.disks))
+        self.copier.stop_requested.connect(self._close)
+        self.worker.written.connect(lambda title, name, adf: self.copier.add_disk(title, f"{stick}  {name}", adf))
+        self.copier.show()
         self.worker.progress.connect(self._progress)
         self.worker.done.connect(self._done)
         self.worker.failed.connect(self._failed)
@@ -3427,11 +3891,15 @@ class GotekDialog(QDialog):
         self.bar.setValue(self.bar.maximum())
         self.close_btn.setText("Close")
         self.open_btn.show()
+        if getattr(self, "copier", None) is not None:
+            self.copier.finish(" ".join(bits))
 
     def _failed(self, err):
         self.worker = None
         self.status.setText(f"Copy failed: {err}")
         self.close_btn.setText("Close")
+        if getattr(self, "copier", None) is not None:
+            self.copier.finish(f"Copy failed: {err}")
 
     def _close(self):
         if self.worker is not None:
@@ -3641,6 +4109,134 @@ class ScanFoldersDialog(QDialog):
         self.changed = (self.sel.roots, self.sel.skips) != (self.old.roots, self.old.skips) or bool(gone)
         self.rescan = self.sel.gains(self.old)
         self.accept()
+
+
+class YearsChart(QWidget):
+    """Disks by year, as bars."""
+
+    def __init__(self, years):
+        super().__init__()
+        self.years = sorted(years.items())
+        self.setMinimumHeight(260)
+        self.setMouseTracking(True)
+
+    def _bars(self):
+        if not self.years:
+            return []
+        w, h = self.width(), self.height()
+        n = len(self.years)
+        bw = max(6, (w - 20) // n)
+        top = max(c for _, c in self.years)
+        return [(QRect(10 + i * bw, h - 24 - int((h - 50) * c / top), bw - 3, int((h - 50) * c / top)), y, c)
+                for i, (y, c) in enumerate(self.years)]
+
+    def event(self, e):
+        if e.type() == QEvent.Type.ToolTip:
+            hit = next(((y, c) for r, y, c in self._bars() if r.left() <= e.pos().x() <= r.right()), None)
+            if hit:
+                QToolTip.showText(e.globalPos(), f"{hit[0]}: {hit[1]:,} disk{'s' if hit[1] != 1 else ''}", self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(e)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        f = ui_font(11)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        bars = self._bars()
+        step = max(1, len(bars) // 12)            # every year's label if they fit
+        for i, (r, y, c) in enumerate(bars):
+            p.fillRect(r, C["accent"])
+            if i % step == 0:
+                p.setPen(C["ink-muted"])
+                p.drawText(QRect(r.left() - 10, self.height() - 20, r.width() + 20, 18),
+                           Qt.AlignmentFlag.AlignHCenter, y)
+            if r.width() >= fm.horizontalAdvance(str(c)):
+                p.setPen(C["ink-soft"])
+                p.drawText(QRect(r.left() - 6, r.top() - 18, r.width() + 12, 16),
+                           Qt.AlignmentFlag.AlignHCenter, str(c))
+        p.end()
+
+
+class StatsDialog(QDialog):
+    """Tools › Collection stats…: who cracked, trained, fixed and hacked your disks, who published
+    them, and when, from their TOSEC names. Double-click a name to find its disks."""
+
+    def __init__(self, parent, items, on_find):
+        super().__init__(parent)
+        self.setWindowTitle("Collection stats")
+        self.resize(760, 640)
+        self.on_find = on_find
+        names = [it.tosec_name or it.file for it in items]
+        s = stats.collect(names)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(10)
+        head = QLabel("Your collection")
+        head.setFont(ui_font(20, QFont.Weight.Bold))
+        v.addWidget(head)
+        years = sorted(s["years"])
+        span = f" · {years[0]}–{years[-1]}" if years else ""
+        sub = _wrap_label(f"{s['disks']:,} disks · {len(s['groups']):,} groups · "
+                          f"{len(s['publishers']):,} publishers{span}", ui_font(13), "muted")
+        sub.setToolTip("Read from each disk's TOSEC name (tags such as [cr Skid Row] or [t +2 Fairlight]); "
+                       "disks that aren't identified count by their file names. Spare copies and empty "
+                       "files aren't counted.")
+        v.addWidget(with_mark(sub))
+        from PySide6.QtWidgets import QTabWidget
+        tabs = QTabWidget()
+        v.addWidget(tabs, 1)
+
+        g = QTreeWidget()
+        g.setRootIsDecorated(False)
+        g.setHeaderLabels(["#", "Group", "Disks", "Cracked", "Trained", "Fixed", "Hacked"])
+        for i, (name, total, c) in enumerate(stats.league(s["groups"]), 1):
+            it = QTreeWidgetItem([str(i), stats.full_name(name), str(total)] +
+                                 [str(c.get(r, "")) for r in ("cracked", "trained", "fixed", "hacked")])
+            it.setData(0, Qt.ItemDataRole.UserRole, name)
+            it.setToolTip(1, f"Double-click to find the disks {name} worked on")
+            g.addTopLevelItem(it)
+        self._tidy(g, 1)
+        tabs.addTab(g, "Crackers and groups")
+
+        pub = QTreeWidget()
+        pub.setRootIsDecorated(False)
+        pub.setHeaderLabels(["#", "Publisher", "Disks"])
+        for i, (name, n) in enumerate(s["publishers"].most_common(), 1):
+            it = QTreeWidgetItem([str(i), name, str(n)])
+            it.setData(0, Qt.ItemDataRole.UserRole, name)
+            pub.addTopLevelItem(it)
+        self._tidy(pub, 1)
+        tabs.addTab(pub, "Publishers")
+
+        tabs.addTab(YearsChart(s["years"]), "Years")
+        for tree in (g, pub):
+            tree.itemDoubleClicked.connect(lambda it, _c: self._find(it.data(0, Qt.ItemDataRole.UserRole)))
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        v.addLayout(row)
+
+    @staticmethod
+    def _tidy(tree, stretch):
+        tree.setUniformRowHeights(True)
+        tree.setAlternatingRowColors(True)
+        h = tree.header()
+        h.setStretchLastSection(False)
+        for c in range(tree.columnCount()):
+            h.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch if c == stretch
+                                   else QHeaderView.ResizeMode.ResizeToContents)
+
+    def _find(self, name):
+        if name and self.on_find:
+            self.on_find(name)
 
 
 class SetupDialog(QDialog):
@@ -3886,6 +4482,454 @@ class RenameDialog(QDialog):
         return done, failed
 
 
+class FeedbackDialog(QDialog):
+    """Help › Report a problem… / Suggest an idea…: a few boxes for the tester's words, the
+    technical details TurboCAT adds, and the exact text shown before it goes anywhere. Open report
+    opens the browser at a new GitHub issue with it all filled in; Copy details is for anyone
+    without a GitHub account (paste it in an email or a forum post)."""
+
+    BOXES = {"problem": [("what", "What were you doing?", "e.g. Scanning my Amiga folder, then pressing Play"),
+                         ("happened", "What happened?", "e.g. The emulator started with a black screen"),
+                         ("expected", "What did you expect?", "e.g. The game to start")],
+             "idea": [("idea", "Your idea", "What would you like TurboCAT to do?"),
+                      ("why", "Why it would help", "What would it make easier? (optional)")],
+             # TurboView on a real Amiga: new, so every report of how it went helps
+             "amiga": [("amiga", "Your Amiga",
+                        "e.g. A1200, Kickstart 3.1, 2 MB, Gotek and a CF hard drive; or A500, 1.3, 1 MB, floppies"),
+                       ("tried", "What you tried",
+                        "e.g. booted the TurboView disks; installed on the hard drive; updated after a scan"),
+                       ("went", "How it went",
+                        "What worked, what didn't or was confusing, and roughly how long things took")]}
+    TITLES = {"problem": "Report a problem", "idea": "Suggest an idea",
+              "amiga": "How TurboView went on your Amiga"}
+    EXAMPLES = {"problem": "e.g. Worms asks for disk 3", "idea": "e.g. Show the year in the list",
+                "amiga": "e.g. Installed on my A1200: works, file search takes 20 seconds"}
+
+    def __init__(self, parent, kind="problem", error="", items=None, happened=""):
+        super().__init__(parent)
+        self.kind = kind
+        self.setObjectName("dialog")
+        self.setWindowTitle(self.TITLES[kind])
+        self.setMinimumWidth(640)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(8)
+        head = QLabel(self.windowTitle())
+        head.setFont(ui_font(18, QFont.Weight.Bold))
+        v.addWidget(head)
+        v.addWidget(_wrap_label(
+            "This goes to TurboCAT's page on GitHub, where the people working on it see it. "
+            "<b>Open report</b> opens your browser with it filled in: check it, then press "
+            "<b>Submit</b> there (a free GitHub account is needed). No account? <b>Copy details</b> "
+            "and send it by email or post it in a forum instead.", ui_font(13), "muted"))
+        v.addSpacing(4)
+        v.addWidget(QLabel("<b>Sum it up in one line</b> (this becomes its title)"))
+        self.title = QLineEdit()
+        self.title.setPlaceholderText(self.EXAMPLES[kind])
+        v.addWidget(self.title)
+        self.boxes = {}
+        for key, label, hint in self.BOXES[kind]:
+            v.addWidget(QLabel(label))
+            box = QPlainTextEdit()
+            box.setPlaceholderText(hint)
+            box.setFixedHeight(64)
+            box.setTabChangesFocus(True)
+            v.addWidget(box)
+            self.boxes[key] = box
+        try:
+            checks = setupcheck.run()
+        except Exception:
+            checks = None
+        self.tech = feedback.details(checks, items)
+        if error:
+            self.tech += "\n\nError:\n" + error
+            self.boxes["happened"].setPlainText(happened or "TurboCAT stopped with an error (its details are below).")
+        elif happened:
+            self.boxes["happened"].setPlainText(happened)
+        sent = QLabel("What will be sent")
+        with_tip = with_mark(sent)
+        sent.setToolTip("Exactly what goes in the report. Your home folder is shown as ~ and your user "
+                        "name is taken out; no file lists or catalogue are sent.")
+        v.addSpacing(4)
+        sent_row = QHBoxLayout()
+        sent_row.setContentsMargins(0, 0, 0, 0)
+        sent_row.addWidget(with_tip, 1)
+        self.privacy_link = QLabel(f"<a href='privacy' style='color:{C['accent'].name()}; "
+                                   "text-decoration:none'>Privacy</a>")
+        self.privacy_link.setFont(ui_font(12, QFont.Weight.DemiBold))
+        self.privacy_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.privacy_link.setToolTip("What TurboCAT sends, what it never does, and what it keeps")
+        self.privacy_link.linkActivated.connect(lambda _l: show_privacy(self))
+        sent_row.addWidget(self.privacy_link)
+        v.addLayout(sent_row)
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setFont(data_font(11))
+        self.preview.setMinimumHeight(140)
+        v.addWidget(self.preview, 1)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.copy_btn = QPushButton("Copy details")
+        self.copy_btn.clicked.connect(self.copy)
+        self.open_btn = QPushButton("Open report")
+        self.open_btn.setObjectName("primary")
+        self.open_btn.clicked.connect(self.open_report)
+        for b in (cancel, self.copy_btn, self.open_btn):
+            buttons.addWidget(b)
+        v.addLayout(buttons)
+        self.title.textChanged.connect(self._update)
+        for box in self.boxes.values():
+            box.textChanged.connect(self._update)
+        self._update()
+
+    def fields(self):
+        return {k: feedback.scrub(b.toPlainText()) for k, b in self.boxes.items()}
+
+    def report_title(self):
+        t = self.title.text().strip()
+        if not t:
+            first = next((x for x in self.fields().values() if x.strip()), "")
+            t = first.strip().splitlines()[0][:70] if first.strip() else ""
+        return feedback.scrub(t)
+
+    def text(self):
+        return f"{self.report_title()}\n\n" + feedback.body(self.kind, self.fields(), self.tech)
+
+    def _update(self):
+        self.preview.setPlainText(self.text())
+        self.open_btn.setEnabled(bool(self.report_title()))
+
+    def copy(self):
+        QGuiApplication.clipboard().setText(self.text())
+        self.copy_btn.setText("Copied")
+
+    def open_report(self):
+        QGuiApplication.clipboard().setText(self.text())      # in case the link has to be cut short
+        QDesktopServices.openUrl(QUrl(feedback.issue_url(self.kind, self.report_title(),
+                                                          self.fields(), self.tech)))
+        self.accept()
+
+
+class RealAmigaDialog(QDialog):
+    """Tools › TurboView on a real Amiga…: the two ways to get TurboView onto a real Amiga, each
+    with what to do on the Amiga, and buttons that make what is needed."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.cat = win.cat
+        self.folder = self.cat.get_meta("turboview_dir") or turboview.default_folder()
+        self.setObjectName("dialog")
+        self.setWindowTitle("TurboView on a real Amiga")
+        self.setMinimumWidth(660)
+        # The explanation scrolls; the result line and the buttons stay put, so a small screen
+        # (or a big font) never pushes them off the bottom.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 14)
+        outer.setSpacing(8)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        area.setWidget(body)
+        outer.addWidget(area, 1)
+        self.area = area
+        v = QVBoxLayout(body)
+        v.setContentsMargins(26, 22, 26, 4)
+        v.setSpacing(8)
+        head = QLabel("TurboView on a real Amiga")
+        head.setFont(ui_font(20, QFont.Weight.Bold))
+        v.addWidget(head)
+        v.addWidget(_wrap_label(
+            "TurboView lists and searches your collection on an Amiga, so on your real Amiga you can "
+            "look up which disk or Gotek image holds the game or tool you want. There are two ways "
+            "to get it there.", ui_font(13), "muted"))
+
+        def section(title, sub):
+            v.addSpacing(10)
+            t = QLabel(title)
+            t.setFont(ui_font(15, QFont.Weight.DemiBold))
+            v.addWidget(t)
+            v.addWidget(_wrap_label(sub, ui_font(12), "muted"))
+
+        def steps(lines):
+            lab = _wrap_label("".join(f"<p style='margin:4px 0'><b>{i}.</b> {t}</p>"
+                                      for i, t in enumerate(lines, 1)), ui_font(13))
+            lab.setTextFormat(Qt.TextFormat.RichText)
+            v.addWidget(lab)
+
+        section("1. TurboView floppies", "Easiest if you have a Gotek, or can write floppies on this "
+                                         "computer. Works on any Amiga, Kickstart 1.3 or later.")
+        steps(["TurboCAT makes two disks that start TurboView by themselves: <b>TurboView.adf</b> (disk 1: "
+               "your disks and what is on each) and <b>TurboView2.adf</b> (disk 2: for searching every file "
+               "name quickly).",
+               "Put them on your Gotek's USB stick (the button below does it), or write them to real "
+               "floppies with a USB floppy tool such as Greaseweazle.",
+               "On the Amiga, choose disk 1 on the Gotek (or put the floppy in) and switch on, and type a "
+               "name to search. To search for a file on any disk, boot disk 2. With two drives, put "
+               "one in each: TurboView uses both. Already on Workbench? Insert a disk and double-click "
+               "its TurboView icon, and keep it open beside your other work."])
+        row = QHBoxLayout()
+        self.gotek_btn = QPushButton("Copy both to Gotek stick")
+        self.gotek_btn.setObjectName("primary")
+        self.gotek_btn.clicked.connect(self.to_gotek)
+        save = QPushButton("Save disk images…")
+        save.clicked.connect(self.save_floppy)
+        row.addWidget(self.gotek_btn)
+        row.addWidget(save)
+        row.addStretch(1)
+        v.addLayout(row)
+        sticks = gotek.find_sticks()
+        self.stick = sticks[0][0] if sticks else None
+        self.gotek_btn.setEnabled(self.stick is not None)
+        self.gotek_btn.setToolTip(f"Copies TurboView.adf and TurboView2.adf to {self.stick}" if self.stick else
+                                  "Plug in your Gotek's USB stick first (FAT32), then open this again")
+
+        size = sum(os.path.getsize(os.path.join(self.folder, n)) for n in turboview.CATALOGUE_FILES
+                   if os.path.exists(os.path.join(self.folder, n)))
+        section("2. On your hard drive (experimental)",
+                f"The full TurboView, with the list of every file on every disk "
+                f"({_short_size(size) if size else 'a few MB'}): no limits, and quick searches.")
+        note = _wrap_label(
+            "<b>New, and not yet tried on a real Amiga.</b> It's meant for an A1200, or any Amiga with "
+            "Kickstart 2.04 or later and a hard drive: there TurboView runs in a window on Workbench, "
+            "with its own icon, and offers to update itself. On a Kickstart 1.3 A500 it can only run "
+            "from the Shell, and installing there is untested. If you try it, please tell us how it went.",
+            ui_font(12))
+        note.setTextFormat(Qt.TextFormat.RichText)
+        v.addWidget(note)
+        steps(["Make the floppies above. Start your Amiga from its hard drive, put disk 1 in a drive, "
+               "open a Shell and type <code>TurboView:TurboView INSTALL DH0:TurboCAT</code> (with your own "
+               "drive and drawer). It copies everything, asks for disk 2 when it needs it, and unpacks "
+               "the list of files: a few minutes on an A500.",
+               "Then double-click <b>TurboView</b> in its drawer. To have it open every time Workbench "
+               "starts (Kickstart 2.0 and later), drag its icon into <b>WBStartup</b>. From a Shell: "
+               "<code>DH0:TurboCAT/TurboView DH0:TurboCAT</code>.",
+               "Or, if your Amiga can read a FAT32 card or stick (with fat95 or similar) or is on a "
+               "network: save the files below and copy the <b>TurboCAT</b> drawer across instead."])
+        row = QHBoxLayout()
+        files = QPushButton("Save files to a folder…")
+        files.clicked.connect(self.save_files)
+        row.addWidget(files)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        v.addStretch(1)
+        self.result = _wrap_label("After a scan, make the disks again, so TurboView knows about new disks: "
+                                  "on a Gotek they replace the old ones. An installed TurboView notices "
+                                  "the new disk 1 in a drive and offers to update itself.",
+                                  ui_font(12), "muted")
+        self.result.setTextFormat(Qt.TextFormat.RichText)
+        self.result.setContentsMargins(26, 0, 26, 0)
+        outer.addWidget(self.result)
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(26, 0, 26, 0)
+        tell = QPushButton("Tell us how it went…")
+        tell.setToolTip("TurboView on a real Amiga is new: what worked, what didn't, and on which Amiga")
+        tell.clicked.connect(lambda: self.win.report("amiga"))
+        bottom.addWidget(tell)
+        bottom.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        bottom.addWidget(close)
+        outer.addLayout(bottom)
+        self._fit_screen(body)
+
+    def _fit_screen(self, body):
+        """As tall as the explanation needs, but never taller than the screen it opens on."""
+        screen = (self.parent().screen() if self.parent() is not None else None) or QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry().height() if screen else 800
+        want = body.sizeHint().height() + 150             # the result line, the buttons, the frame
+        self.resize(max(self.minimumWidth(), body.sizeHint().width()), min(want, avail - 60))
+
+    def _fresh(self):
+        """TurboView's catalogue written just now, so it has the latest scan and favourites."""
+        w = getattr(self.win, "tv_worker", None)
+        if w is not None:
+            w.wait(60000)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            turboview.export(self.cat, load_items(self.cat), self.folder)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _floppies(self, path1, path2):
+        """Both disks; returns disk 1's result (with search=False if disk 2 couldn't be made)."""
+        try:
+            self._fresh()
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                r = turboview.make_floppy(self.folder, path1)
+                try:
+                    turboview.make_search_floppy(self.folder, path2)
+                    r["search"] = True
+                except ValueError as ex:
+                    r["search"], r["search_why"] = False, str(ex)
+                return r
+            finally:
+                QApplication.restoreOverrideCursor()
+        except Exception as ex:
+            QMessageBox.warning(self, "TurboView floppies", f"The disk images couldn't be made: {ex}")
+            return None
+
+    def _show_copier(self, paths, r, where):
+        """The copier screen, showing the TurboView disks just written."""
+        cop = self.copier = CopierDialog(self, self.cat, "Writing the TurboView disks",
+                                         total=2 if r.get("search") else 1)
+        titles = ("TurboView (disk 1)", "TurboView2 (disk 2, search)")
+        for title, path in zip(titles, paths if r.get("search") else paths[:1]):
+            with open(path, "rb") as f:
+                cop.add_disk(title, f"{where}  {os.path.basename(path)}", f.read())
+        cop.finish(re.sub(r"<[^>]+>", "", self._contents_note(r)))
+        cop.show()
+
+    def _say(self, text):
+        self.result.setText(text)
+        self.result.setObjectName("")
+        self.result.style().unpolish(self.result)
+        self.result.style().polish(self.result)
+
+    def _contents_note(self, r):
+        if not r.get("search", True):
+            return f"Disk 2 couldn't be made ({_esc(r.get('search_why', ''))}), so only disk 1 is there."
+        if r.get("files") == "packed":
+            return ("Disk 1 has the list of every file too, packed to fit, so TurboView can show what is on "
+                    "each disk; disk 2 searches every file name quickly.")
+        return ("It has the list of every file too, so TurboView can show what is on each disk."
+                if r["with_files"] else
+                "The list of every file on every disk is too big for a floppy, so TurboView shows each "
+                "disk's name, type and problems, but not what is on it; the files for your hard drive "
+                "have everything.")
+
+    def to_gotek(self):
+        numbered = bool(self.cat.get_meta("gotek_numbered", False))
+        if numbered:                       # an update reuses the old TurboView disks' numbers
+            names = tuple(turboview.gotek_slots(self.stick))
+        else:
+            names = (turboview.FLOPPY_NAME, turboview.SEARCH_FLOPPY_NAME)
+        paths = [os.path.join(self.stick, n) for n in names]
+        r = self._floppies(*paths)
+        if r:
+            self._show_copier(paths, r, os.path.basename(self.stick.rstrip("/")) or self.stick)
+            pick = (f"image number {int(names[0][4:8])} (disk 1; disk 2 is number {int(names[1][4:8])})"
+                    if numbered else f"{names[0]} (disk 1; disk 2 is {names[1]})")
+            self._say(f"<b>Copied to {_esc(self.stick)}.</b> On the Amiga, choose {pick} on the Gotek and "
+                      f"switch on. {self._contents_note(r)} Eject the stick safely before unplugging it.")
+
+    def save_floppy(self):
+        dest = QFileDialog.getExistingDirectory(self, "Where to save the two TurboView disk images",
+                                                os.path.expanduser("~"))
+        if dest:
+            paths = [os.path.join(dest, n) for n in (turboview.FLOPPY_NAME, turboview.SEARCH_FLOPPY_NAME)]
+            r = self._floppies(*paths)
+            if r:
+                self._show_copier(paths, r, os.path.basename(dest) or dest)
+                self._say(f"<b>Saved {turboview.FLOPPY_NAME} and {turboview.SEARCH_FLOPPY_NAME} in "
+                          f"{_esc(dest)}.</b> {self._contents_note(r)}")
+
+    def save_files(self):
+        dest = QFileDialog.getExistingDirectory(self, "Where to put the TurboCAT drawer", os.path.expanduser("~"))
+        if not dest:
+            return
+        try:
+            self._fresh()
+            out = turboview.copy_files(self.folder, dest)
+        except Exception as ex:
+            QMessageBox.warning(self, "TurboView files", f"The files couldn't be saved: {ex}")
+            return
+        self._say(f"<b>Saved the TurboCAT drawer in {_esc(dest)}.</b> Copy it to the Amiga's hard drive, "
+                  "then start it from the Shell: <code>DH0:TurboCAT/TurboView DH0:TurboCAT</code>.")
+
+
+class PrivacyDialog(QDialog):
+    """Help › Privacy: what TurboCAT sends, what it never does, and what it keeps (privacy.py)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("dialog")
+        self.setWindowTitle("Privacy")
+        self.setMinimumSize(620, 560)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(10)
+        head = QLabel("Privacy")
+        head.setFont(ui_font(20, QFont.Weight.Bold))
+        v.addWidget(head)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        self.text = QLabel(privacy.rich_text(C["accent"].name()))
+        self.text.setTextFormat(Qt.TextFormat.RichText)
+        self.text.setWordWrap(True)
+        self.text.setFont(ui_font(13))
+        self.text.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.text.setContentsMargins(0, 0, 12, 0)
+        area.setWidget(self.text)
+        v.addWidget(area, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.setObjectName("primary")
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        v.addLayout(row)
+
+
+def show_privacy(parent):
+    dlg = PrivacyDialog(parent)
+    dlg.exec()
+    dlg.deleteLater()
+
+
+class IdeaNudge(QFrame):
+    """The one-off reminder of the suggestion box: a small note above the status bar's
+    "Got an idea?" link. Clicking anywhere else closes it."""
+
+    def __init__(self, parent, on_idea):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("ideaNudge")
+        self.setStyleSheet("QFrame#ideaNudge { background: #ffffe1; border: 1px solid #000000; }"
+                           " QLabel { color: #000000; background: transparent; }")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(10)
+        words = QLabel("<b>Got ideas for TurboCAT?</b><br>You've used it a few times now. If there's "
+                       "something you'd like it to do, or something that could be easier, the people "
+                       "working on it would like to hear. <b>Got an idea?</b>, at the bottom of the "
+                       "window, is always there.")
+        words.setWordWrap(True)
+        words.setFixedWidth(360)
+        words.setFont(ui_font(12))
+        v.addWidget(words)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        later = QPushButton("Not now")
+        later.clicked.connect(self.close)
+        go = QPushButton("Suggest an idea…")
+        go.setObjectName("primary")
+        go.clicked.connect(lambda: (self.close(), on_idea()))
+        for b in (later, go):
+            b.setFont(ui_font(12, QFont.Weight.DemiBold))
+            row.addWidget(b)
+        v.addLayout(row)
+
+    def show_above(self, widget):
+        self.adjustSize()
+        at = widget.mapToGlobal(QPoint(widget.width(), 0))
+        self.move(at.x() - self.width(), at.y() - self.height() - 6)
+        self.show()
+
+
+class CrashRelay(QObject):
+    """Carries an unexpected error from whichever thread it happened on to the window's."""
+    raised = Signal(object, object, object)
+
+
 class AboutDialog(QDialog):
     """About TurboCAT 4: version, the catalogue in use and its safety copies, what it is built on."""
 
@@ -3994,8 +5038,16 @@ class AboutDialog(QDialog):
         link.setTextFormat(Qt.TextFormat.RichText)
         link.setOpenExternalLinks(True)
         v.addWidget(link)
+        v.addWidget(_wrap_label("Ideas are welcome: tell the people working on TurboCAT what you'd like it "
+                                "to do, or what didn't work.", ui_font(12), "muted"))
 
         buttons = QHBoxLayout()
+        win = parent if hasattr(parent, "report") else None
+        if win is not None:
+            idea = QPushButton("Suggest an idea…")
+            idea.setFont(ui_font(13, QFont.Weight.DemiBold))
+            idea.clicked.connect(lambda: (self.accept(), win.report("idea")))
+            buttons.addWidget(idea)
         buttons.addStretch(1)
         if copies:
             open_btn = QPushButton("Show safety copies")
@@ -4091,8 +5143,10 @@ class MainWindow(QMainWindow):
         scan_menu.addAction("Choose scan folders…", self.manage_scan_folders)
         self.scan_btn.setMenu(scan_menu)
         self.tv_btn = QPushButton("TurboView")
-        self.tv_btn.setToolTip("Start an emulated Amiga with TurboView, the Amiga side of TurboCAT, "
-                               "and your collection folders mounted as drives")
+        self.tv_btn.setToolTip("TurboView is the Amiga side of TurboCAT: it lists and searches your "
+                               "collection on an Amiga. This starts it in an emulated Amiga with your "
+                               "folders as drives. It also runs on a real Amiga, to find what is on your "
+                               "disks and Gotek stick: Tools › TurboView on a real Amiga.")
         self.setup_btn = QPushButton("Setup")
         self.setup_btn.setIcon(QIcon(icon("ok", 16)))
         self.setup_btn.setToolTip("What works on this computer, and what to install for the rest")
@@ -4175,6 +5229,7 @@ class MainWindow(QMainWindow):
         self.scan_busy.setTextVisible(False)
         self.scan_text = QLabel()
         self.scan_text.setFont(ui_font(13, QFont.Weight.DemiBold))
+        self.scan_text.setWordWrap(True)        # a long result wraps rather than widen the window
         self.scan_file = QLabel()
         self.scan_file.setObjectName("scanFile")
         self.scan_file.setFont(ui_font(12))
@@ -4194,7 +5249,8 @@ class MainWindow(QMainWindow):
         sr = QHBoxLayout(self.sub_row)
         sr.setContentsMargins(0, 0, 4, 2)
         sr.setSpacing(12)
-        self.sub_text = QLabel()
+        self.sub_text = ElidedLabel()            # long archive names shorten with …
+        self.sub_text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.sub_text.setFont(ui_font(12, QFont.Weight.DemiBold))
         self.sub_meter = QProgressBar()
         self.sub_meter.setObjectName("scanMeter")
@@ -4415,6 +5471,15 @@ class MainWindow(QMainWindow):
         self.foot_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         fl.addWidget(self.foot_left, 1)
         fl.addWidget(self.foot_stop, 0, Qt.AlignmentFlag.AlignVCenter)
+        # Always in sight: the suggestion box (Help › Suggest an idea…)
+        self.idea_link = QLabel(f"<a href='idea' style='color:{C['accent'].name()}; text-decoration:none'>"
+                                "Got an idea?</a>")
+        self.idea_link.setFont(ui_font(12, QFont.Weight.DemiBold))
+        self.idea_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.idea_link.setToolTip("Suggest something you'd like TurboCAT to do. It goes to the people "
+                                  "working on it, and other testers can vote for it.")
+        self.idea_link.linkActivated.connect(lambda _l: self.report("idea"))
+        fl.addWidget(self.idea_link, 0, Qt.AlignmentFlag.AlignVCenter)
         fl.addWidget(self.foot_right, 0)
         fl.addWidget(HoverMark(self.foot_right), 0, Qt.AlignmentFlag.AlignVCenter)
         v.addWidget(foot)
@@ -4431,6 +5496,7 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(lambda _i: self.play_selected())
         self._build_menus()
         QTimer.singleShot(1500, self._setup_on_start)
+        QTimer.singleShot(1600, self._count_start)
         self.emulators = None
         self.worker = None
         self.bar_mode = "scan"
@@ -4539,12 +5605,35 @@ class MainWindow(QMainWindow):
                                 "Find each disk's proper name from its checksum, in the TOSEC list of Amiga disks")
         add(m, "&Rename files to their proper names…", self.rename_to_tosec, None,
             "Rename identified disks' files to their TOSEC names (shows the list first)")
+        add(m, "Look on &Aminet for missing files…", self.look_on_aminet, None,
+            "Damaged files that none of your disks have: look for freely distributable copies with exactly "
+            "the same name and size on Aminet, so Fix all can put them back")
+        add(m, "Collection &stats…", self.show_stats, None,
+            "Who cracked, trained and fixed your disks, who published them, and when")
+        add(m, "TurboView on a &real Amiga…", lambda: self.turboview_real(), None,
+            "Put TurboView on your real Amiga (a floppy for a Gotek, or files for a hard drive), with "
+            "how to do it")
         add(m, "Start &TurboView", self.start_turboview, None,
-            "Start an emulated Amiga with TurboView and your collection mounted")
+            "Start TurboView, the Amiga side of TurboCAT, in an emulated Amiga with your collection mounted "
+            "(for a real Amiga: TurboView on a real Amiga…)")
 
         m = bar.addMenu("&Help")
         add(m, "&Check setup…", self.check_setup, None,
             "What TurboCAT uses (emulator, Kickstart ROMs, music players…), what's missing and how to get it")
+        m.addSeparator()
+        add(m, "&Report a problem…", lambda: self.report("problem"), None,
+            "Tell the people working on TurboCAT what went wrong; the technical details are filled in for you")
+        add(m, "Suggest an &idea…", lambda: self.report("idea"), None,
+            "Something you'd like TurboCAT to do")
+        add(m, "How TurboView went on your &Amiga…", lambda: self.report("amiga"), None,
+            "TurboView on a real Amiga is new: tell the people working on it what worked and what didn't")
+        self.act_errors = add(m, "Show &error reports", lambda: self.set_error_reports(self.act_errors.isChecked()), None,
+                              "When something goes wrong inside TurboCAT, say so and offer to report it. "
+                              "Untick to stop these boxes")
+        self.act_errors.setCheckable(True)
+        add(m, "Pri&vacy…", lambda: show_privacy(self), None,
+            "What TurboCAT sends over the internet (and when), what it never does, and what it keeps")
+        self.act_errors.setChecked(self.error_reports_on())
         m.addSeparator()
         add(m, f"&About {APP_NAME}", self.show_about, "F1")
         add(m, f"{APP_NAME} on &GitHub", lambda: QDesktopServices.openUrl(QUrl(AboutDialog.REPO)))
@@ -4765,6 +5854,103 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is go:
             self.check_setup()
 
+    def report(self, kind="problem", error="", happened=""):
+        dlg = FeedbackDialog(self, kind, error, items=len(getattr(self, "all_items", []) or []),
+                             happened=happened)
+        dlg.exec()
+        dlg.deleteLater()
+
+    def show_crash(self, exc_type, exc, tb):
+        """An unexpected error: say so plainly, once per kind of error, and offer to report it.
+        The kill switch: the box's "Don't show these again" (or Help › Show error reports) turns
+        the boxes off for good, and TurboCAT pauses them by itself for the rest of the session when
+        they come too often. Either way, if there were real errors, it offers one report saying why."""
+        log = self.__dict__.setdefault("crash_log", feedback.CrashLog())
+        log.add(exc_type, exc, tb)
+        if getattr(self, "closing", False) or getattr(self, "crash_open", False):
+            return
+        if not self.error_reports_on() or getattr(self, "crash_paused", False):
+            self.foot_left.setText(f"TurboCAT hit a problem ({exc_type.__name__}); error reports are off. "
+                                   "Help › Report a problem… if something isn't working.")
+            return
+        sig = (exc_type.__name__, str(exc)[:200])
+        seen = self.__dict__.setdefault("crashes_seen", set())
+        if sig in seen:
+            return
+        seen.add(sig)
+        if log.storm():
+            self.crash_paused = True
+            self.foot_left.setText("Error reports paused for now: they were coming too often.")
+            self._offer_switch_report("auto")
+            return
+        self.crash_open = True
+        try:
+            details = feedback.error_text(exc_type, exc, tb)
+            box = QMessageBox(QMessageBox.Icon.Warning, "TurboCAT hit a problem",
+                              "Something went wrong inside TurboCAT.", parent=self)
+            box.setInformativeText(
+                "Your catalogue is saved as TurboCAT goes, so nothing already done is lost. You can "
+                "carry on; if things look wrong, close TurboCAT and start it again.\n\n"
+                "Reporting it helps get it fixed: what went wrong (Show Details…) is filled in for you.")
+            box.setDetailedText(details)
+            stop = QCheckBox("Don't show these again")
+            stop.setToolTip("Turns these boxes off. Help › Show error reports turns them back on.")
+            box.setCheckBox(stop)
+            rep_btn = box.addButton("Report it…", QMessageBox.ButtonRole.AcceptRole)
+            copy_btn = box.addButton("Copy details", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("Carry on", QMessageBox.ButtonRole.RejectRole)
+            log.box_shown()
+            box.exec()
+            if box.clickedButton() is copy_btn:
+                QGuiApplication.clipboard().setText(details)
+            elif box.clickedButton() is rep_btn:
+                self.report("problem", details)
+            if stop.isChecked():
+                self.set_error_reports(False, offer=box.clickedButton() is not rep_btn)
+        finally:
+            self.crash_open = False
+
+    def error_reports_on(self):
+        return bool(self.cat.get_meta("error_reports", True))
+
+    def set_error_reports(self, on, offer=True):
+        """Help › Show error reports, or the box's "Don't show these again"."""
+        self.cat.set_meta("error_reports", bool(on))
+        if hasattr(self, "act_errors"):
+            self.act_errors.setChecked(bool(on))
+        if on:
+            self.crash_paused = False
+        elif offer:
+            self._offer_switch_report("user")
+
+    def _offer_switch_report(self, how):
+        """Error reports were switched off: if there was a real reason (errors this session), offer
+        once to tell the people working on TurboCAT why. Nothing is sent unless the tester does."""
+        log = getattr(self, "crash_log", None)
+        if log is None or not log.errors or getattr(self, "switch_offered", False):
+            return
+        self.switch_offered = True
+        reason = log.reason(how)
+        ask = QMessageBox(QMessageBox.Icon.Information, "Error reports",
+                          ("TurboCAT has hit several problems in a short time, so it will stop "
+                           "interrupting you with them until you start it again." if how == "auto" else
+                           "Error reports are off. Help › Show error reports turns them back on.")
+                          + "\n\nTelling the people working on TurboCAT what happened helps get it fixed. "
+                          "Nothing is sent unless you choose to.", parent=self)
+        ask.setDetailedText(reason)
+        go = ask.addButton("Report it…", QMessageBox.ButtonRole.AcceptRole)
+        ask.addButton("No thanks", QMessageBox.ButtonRole.RejectRole)
+        self.crash_open = True
+        try:
+            ask.exec()
+        finally:
+            self.crash_open = False
+        if ask.clickedButton() is go:
+            first = log.kinds()[0]
+            self.report("problem", reason,
+                        happened=f"Error reports were switched off ({'paused by TurboCAT' if how == 'auto' else 'by me'}): "
+                                 f"{len(log.errors)} errors, mostly {first[0]}: {first[1]}")
+
     def check_setup(self):
         dlg = SetupDialog(self, on_identify=self.identify_online)
         dlg.exec()
@@ -4801,6 +5987,29 @@ class MainWindow(QMainWindow):
         missing = sorted(c.name for c in checks if c.status != setupcheck.OK and c.important)
         if missing and missing != self.cat.get_meta("setup_seen"):
             self.check_setup()
+
+    IDEA_NUDGE_AT = 10            # starts before the one-off reminder of the suggestion box
+
+    def _count_start(self):
+        starts = (self.cat.get_meta("starts", 0) or 0) + 1
+        self.cat.set_meta("starts", starts)
+        if starts >= self.IDEA_NUDGE_AT and not self.cat.get_meta("idea_nudged", False):
+            QTimer.singleShot(8000, self._idea_nudge)       # once the window has settled
+
+    def _idea_nudge(self):
+        """Show the reminder once: not over another window, nor while TurboCAT is busy."""
+        if (QApplication.activeModalWidget() is not None or getattr(self, "closing", False)
+                or self._busy() or not self.isVisible() or not self.idea_link.isVisible()):
+            QTimer.singleShot(60000, self._idea_nudge)       # try again in a minute
+            return
+        self.cat.set_meta("idea_nudged", True)
+        self.nudge = IdeaNudge(self, lambda: self.report("idea"))
+        self.nudge.show_above(self.idea_link)
+
+    def turboview_real(self):
+        dlg = RealAmigaDialog(self)
+        dlg.exec()
+        dlg.deleteLater()
 
     def show_about(self):
         dlg = AboutDialog(self, self.cat, self.db_path)
@@ -4866,17 +6075,19 @@ class MainWindow(QMainWindow):
     def start_turboview(self):
         """Boot an emulated A1200 from the TurboView folder, with the collection mounted."""
         folder = self.cat.get_meta("turboview_dir") or turboview.default_folder()
-        if not turboview.install(folder) or not os.path.exists(os.path.join(folder, "TurboCAT.cat")):
-            missing = "the TurboView program" if not os.path.exists(os.path.join(folder, "TurboView")) \
-                else "the catalogue (it is written after the next look through the disks)"
-            QMessageBox.information(self, "TurboView", f"TurboView can't start yet: {missing} "
-                                    f"is not in {folder}.")
-            return
         if self.emulators is None:
             self.emulators = emulator.find_emulators()
         emu = self.cat.get_meta("emulator", "amiberry")
         if emu not in (self.emulators or {}):
             emu = next(iter(self.emulators or {}), None)
+        # FS-UAE shows only part of TurboView's 1280x512 screen, so there it opens a 640x512 one
+        screen = "HIGH" if emu == "fs-uae" else "SUPER"
+        if not turboview.install(folder, screen) or not os.path.exists(os.path.join(folder, "TurboCAT.cat")):
+            missing = "the TurboView program" if not os.path.exists(os.path.join(folder, "TurboView")) \
+                else "the catalogue (it is written after the next look through the disks)"
+            QMessageBox.information(self, "TurboView", f"TurboView can't start yet: {missing} "
+                                    f"is not in {folder}.")
+            return
         if emu is None:
             self._missing_emulator("TurboView")
             return
@@ -5045,12 +6256,28 @@ class MainWindow(QMainWindow):
                                 "original is unchanged.")
             return
         QApplication.restoreOverrideCursor()
+        self._copier_one("Writing the repaired copy", p.source_file, res.path,
+                         f"{len(res.restored)} damaged file{'s' if len(res.restored) != 1 else ''} put back"
+                         + (f"; {len(res.missing)} still missing." if res.missing else "."))
         self._start_scan([repair.REPAIRED_DIR], "Adding the repaired copy to the catalogue…")
         self.result_label.setText(
             f"Made {os.path.basename(res.path)}: {len(res.restored)} file"
             f"{'s' if len(res.restored) != 1 else ''} put back"
             + (f", {len(res.missing)} still missing" if res.missing else "")
             + f" · in {repair.REPAIRED_DIR}")
+
+    def show_stats(self):
+        """Tools › Collection stats…"""
+        if self.loading:
+            return
+        items = [it for it in self.all_items if not it.spare_of and it.status != "empty"]
+
+        def find(name):
+            self.set_filter("all")
+            self.search.edit.setText(name)
+            self.run_search()
+            self.raise_()
+        StatsDialog(self, items, find).exec()
 
     def make_tidied_copy(self, media_id):
         """For a disk whose files all read but whose index (directory) has errors: say what will be
@@ -5086,9 +6313,23 @@ class MainWindow(QMainWindow):
                                 "original is unchanged.")
             return
         QApplication.restoreOverrideCursor()
+        self._copier_one("Writing the tidied copy", p.source_file, res.path,
+                         "The same files, on a fresh disk with a correct index.")
         self._start_scan([repair.REPAIRED_DIR], "Adding the tidied copy to the catalogue…")
         self.result_label.setText(f"Made {os.path.basename(res.path)}: the same files, with a correct "
                                   f"index · in {repair.REPAIRED_DIR}")
+
+    def _copier_one(self, title, original, path, summary):
+        """The copier screen for one disk just written (a repaired or tidied copy)."""
+        try:
+            with open(path, "rb") as f:
+                adf = f.read()
+        except OSError:
+            return
+        cop = self.copier = CopierDialog(self, self.cat, title, total=1)
+        cop.add_disk(os.path.splitext(original)[0], os.path.basename(path), adf)
+        cop.finish(summary + f" It's in {repair.REPAIRED_DIR}; your original isn't changed.")
+        cop.show()
 
     def _save_missing(self, results):
         """Save the files the repaired copies still lack, as a spreadsheet to work from."""
@@ -5105,6 +6346,72 @@ class MainWindow(QMainWindow):
                 for x in r.missing:
                     w.writerow([r.original, x.path, x.size, os.path.basename(r.path)])
         self.result_label.setText(f"Saved the missing files to {path}")
+
+    def look_on_aminet(self):
+        """Tools › Look on Aminet for missing files…: says what it will do, asks, then looks."""
+        if getattr(self, "aminet_worker", None) is not None:
+            return
+        todo = AminetWorker.wanted(self.cat)
+        if not todo:
+            QMessageBox.information(self, "Look on Aminet", "There's nothing new to look for: every damaged "
+                                    "file is on your other disks, or has been looked for already, or is "
+                                    "one TurboCAT doesn't look for (Commodore's own files, and names too "
+                                    "plain to search for, like \u201c1\u201d).")
+            return
+        mins = max(1, round(len(todo) * 15 / 60))
+        verb = "isn't" if len(todo) == 1 else "aren't"
+        ask = QMessageBox(QMessageBox.Icon.Question, "Look on Aminet",
+                          f"{_n(len(todo), 'damaged file')} {verb} on any of your other disks. TurboCAT can "
+                          "look for them on Aminet, which only holds freely distributable software.\n\n"
+                          "Only a file with exactly the same name and size is downloaded, and only that "
+                          "file is kept. Commodore's own files (Workbench libraries, fonts and commands) "
+                          "are never downloaded: they come from your own Workbench disks.\n\n"
+                          f"This takes about {mins} minute{'s' if mins != 1 else ''}, as TurboCAT asks "
+                          "Aminet one thing at a time. Nothing is changed until you use Fix all.",
+                          parent=self)
+        go = ask.addButton("Look", QMessageBox.ButtonRole.AcceptRole)
+        ask.addButton(QMessageBox.StandardButton.Cancel)
+        ask.exec()
+        if ask.clickedButton() is not go:
+            return
+        before = {k for k, p in repair.plan_all(self.cat).items() if p.complete()}
+        prog = QProgressDialog("Getting ready…", "Stop", 0, len(todo), self)
+        prog.setWindowTitle("Looking on Aminet")
+        prog.setMinimumDuration(0)
+        prog.setMinimumWidth(520)
+        w = self.aminet_worker = AminetWorker(self.db_path)
+
+        def step(done, total, name):
+            prog.setValue(done)
+            prog.setLabelText(f"Looking for {done + 1} of {total}\n{name}")
+
+        def finished(looked, found, stopped):
+            prog.close()
+            self.aminet_worker = None
+            if getattr(self, "closing", False):
+                return
+            plans = repair.plan_all(self.cat)
+            now = {k for k, p in plans.items() if p.complete()} - before
+            helped = [p for p in plans.values() if any(x.use is not None and x.use.online for x in p.lost)]
+            lines = [f"Looked for {_n(looked, 'file')}; found {found} on Aminet with exactly the same "
+                     "name and size."]
+            if helped:
+                lines.append(f"\nThat helps {_n(len(helped), 'damaged disk')}"
+                             + (f", and {len(now)} of them can now be rebuilt completely" if now else "")
+                             + ". Use Fix all to make the repaired copies.")
+            elif found == 0 and looked:
+                lines.append("\nAminet often has a different version of a file (another size), "
+                             "which TurboCAT doesn't use: a program can fail with a library it "
+                             "wasn't made for.")
+            if stopped:
+                lines.append("\nStopped: the rest will be looked for next time.")
+            self.reload()
+            QMessageBox.information(self, "Look on Aminet", "\n".join(lines))
+
+        w.step.connect(step)
+        w.done.connect(finished)
+        prog.canceled.connect(lambda: setattr(w, "stop_wanted", True))
+        w.start()
 
     def fix_all(self):
         """Fix all…: rebuild every damaged disk that files on other disks can fix, and read again
@@ -5133,28 +6440,22 @@ class MainWindow(QMainWindow):
             if files:
                 self._start_scan(None, "Reading them again…", files=files)
             return
-        prog = QProgressDialog("Getting ready…", "Stop", 0, len(chosen), self)
-        prog.setWindowTitle("Fixing damaged disks")
-        prog.setWindowModality(Qt.WindowModality.WindowModal)
-        prog.setMinimumDuration(0)
-        prog.setMinimumWidth(520)
-        started = time.monotonic()
         self.cat.add_scan_roots([repair.REPAIRED_DIR])     # so a Rescan finds them, whatever happens
         w = self.repairer = RepairWorker(self.db_path, chosen, dlg.mark())
+        cop = self.copier = CopierDialog(self, self.cat, "Fixing damaged disks", total=len(chosen))
+        cop.stop_requested.connect(lambda: setattr(w, "stop_wanted", True))
+
+        def built(path, original):
+            try:
+                with open(path, "rb") as f:
+                    cop.add_disk(os.path.splitext(original)[0], os.path.basename(path), f.read())
+            except OSError:
+                pass
 
         def step(done, total, name):
-            prog.setValue(done)
-            left = ""
-            if done:
-                secs = (time.monotonic() - started) / done * (total - done)
-                left = " · " + ("a few seconds left" if secs < 10 else
-                                f"about {int(secs) + 1} seconds left" if secs < 60 else
-                                self._about(secs) + " left")
-            prog.setLabelText(f"Repairing {done + 1} of {total}{left}\n{name}")
+            pass                                       # the copier screen shows each copy as it's made
 
         def finished(made, failed):
-            prog.setValue(len(chosen))
-            prog.close()
             self.repairer = None
             if getattr(self, "closing", False):
                 return                  # closing: what's made is on disk; the next scan adds it
@@ -5188,18 +6489,23 @@ class MainWindow(QMainWindow):
                 lines += [f"   #{p.number:04d} {p.source_file}: {why}" for p, why in failed[:15]]
             lines.append(f"\nThey're in {repair.REPAIRED_DIR}, and are being added to the catalogue now. "
                          "Your original disk images haven't been changed.")
-            box = QMessageBox(QMessageBox.Icon.Warning if failed else QMessageBox.Icon.Information,
-                              "Fixing damaged disks", "\n".join(lines), parent=self)
-            save = box.addButton("Save list of missing files…", QMessageBox.ButtonRole.ActionRole) \
-                if short else None
-            box.addButton(QMessageBox.StandardButton.Ok)
-            box.exec()
-            if save is not None and box.clickedButton() is save:
-                self._save_missing(short)
+            def report(_result=None):
+                box = QMessageBox(QMessageBox.Icon.Warning if failed else QMessageBox.Icon.Information,
+                                  "Fixing damaged disks", "\n".join(lines), parent=self)
+                save = box.addButton("Save list of missing files…", QMessageBox.ButtonRole.ActionRole) \
+                    if short else None
+                box.addButton(QMessageBox.StandardButton.Ok)
+                box.exec()
+                if save is not None and box.clickedButton() is save:
+                    self._save_missing(short)
+            # the full report once the copier screen is closed
+            cop.finished.connect(report)
+            cop.finish(lines[0] + (" Close this for the details." if len(lines) > 1 else ""))
 
         w.step.connect(step)
+        w.built.connect(built)
         w.done.connect(finished)
-        prog.canceled.connect(lambda: setattr(w, "stop_wanted", True))
+        cop.show()
         w.start()
 
     def recheck_items(self, ids=None):
@@ -5567,10 +6873,16 @@ class MainWindow(QMainWindow):
 
     def rename_to_tosec(self):
         """Tools > Rename files to their proper names: show every rename, do them on request."""
-        plan = identify.rename_plan([it for it in self.all_items if not it.members])
+        spares = []
+        plan = identify.rename_plan([it for it in self.all_items if not it.members], spares)
+        spare_note = (f" {_n(len(spares), 'file')} {'is a spare copy' if len(spares) == 1 else 'are spare copies'}"
+                      " of disks whose properly named file is already in the same folder, so "
+                      f"{'it stays' if len(spares) == 1 else 'they stay'} as "
+                      f"{'it is' if len(spares) == 1 else 'they are'} (Duplicates lists them)."
+                      if spares else "")
         if not plan:
             QMessageBox.information(self, "Rename files", "There is nothing to rename: every identified "
-                                    "disk's file already has its proper name." if any(
+                                    "disk's file already has its proper name." + spare_note if any(
                                         it.tosec_name for it in self.all_items) else
                                     "No disks have been identified yet. Tools › Identify disks online… "
                                     "finds their proper names first.")
@@ -5581,6 +6893,7 @@ class MainWindow(QMainWindow):
         done, failed = dlg.apply(self.cat)
         self.reload()
         msg = f"Renamed {_n(done, 'file')}" + (f"; {failed} couldn't be renamed" if failed else "") + \
+              (f" · {len(spares)} spare cop{'y' if len(spares) == 1 else 'ies'} left as they are" if spares else "") + \
               f" · the old and new names are listed in {RenameDialog.LOG}"
         self.result_label.setText(msg)
 
@@ -5877,7 +7190,8 @@ class MainWindow(QMainWindow):
         """What is still running in the background, in words (empty if nothing)."""
         return " and ".join(w for w, t in (("the scan", self.worker), ("the picture search", self.pic_worker),
                                            ("updating TurboView", getattr(self, "tv_worker", None)),
-                                           ("the repairs", getattr(self, "repairer", None)))
+                                           ("the repairs", getattr(self, "repairer", None)),
+                                           ("the Aminet look-up", getattr(self, "aminet_worker", None)))
                             if t is not None)
 
     def closeEvent(self, event):
@@ -5895,7 +7209,8 @@ class MainWindow(QMainWindow):
             super().closeEvent(event)
             return
         event.ignore()
-        for t in (self.worker, self.pic_worker, self.tv_worker, getattr(self, "repairer", None)):
+        for t in (self.worker, self.pic_worker, self.tv_worker, getattr(self, "repairer", None),
+                  getattr(self, "aminet_worker", None)):
             if t is not None:
                 t.stop_wanted = True
                 t.finished.connect(self._close_when_idle)
@@ -6432,5 +7747,8 @@ def run(db_path):
     if not _catalogue_ready(db_path):
         return 1
     w = MainWindow(db_path)
+    w.crash_relay = CrashRelay()
+    w.crash_relay.raised.connect(w.show_crash, Qt.ConnectionType.QueuedConnection)
+    feedback.install_catcher(w.crash_relay.raised.emit)
     w.show()
     return app.exec()

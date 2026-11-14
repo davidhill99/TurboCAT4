@@ -1,0 +1,34 @@
+name: How TurboView went on your Amiga
+description: TurboView on a real Amiga (floppies, Gotek, hard drive install) is new - tell us how it went
+title: "[Real Amiga] "
+labels: ["real Amiga", "to sort"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying TurboView on a real Amiga. TurboCAT's **Help › How TurboView went on your Amiga…**
+        fills in this form for you. The checklist of things worth trying is in docs/testing-turboview-on-a-real-amiga.md.
+  - type: textarea
+    id: amiga
+    attributes:
+      label: Your Amiga
+      description: Model, Kickstart, memory, and Gotek / floppies / hard drive
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+  - type: textarea
+    id: went
+    attributes:
+      label: How it went
+      description: What worked, what didn't or was confusing, and roughly how long things took
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: TurboCAT's version and your system (filled in by TurboCAT)
+      render: text

@@ -46,10 +46,27 @@ cd ~/TurboCAT4
 alias tc='~/turbocat-env/bin/python -m turbocat'
 ```
 
+TurboView is the Amiga side of TurboCAT: it lists and searches your collection on an Amiga.
+The TurboView button starts it in an emulator, with your folders as drives (there it can also put
+a disk into a drive). It also runs on a real Amiga (Kickstart 1.3 or later), to find which disk or Gotek image holds
+what: **Tools › TurboView on a real Amiga…** makes two TurboView floppies that start by themselves
+(disk 1: your disks and what is on each; disk 2: quick searches of every file name), for a Gotek or
+real floppies. `TurboView:TurboView INSTALL DH0:TurboCAT` installs them on a hard drive. Like the
+original TurboView it is a Workbench tool: double-click its icon (its CATALOGUE tooltype says where its
+lists are), keep it open beside your work, zoom it down to its title bar, or put it in WBStartup.
+After the next scan, make the disks again: an installed TurboView notices the new disk 1 in a drive and
+offers to update itself (keeping its icon's tooltypes, and updating a copy in WBStartup).
+The hard-drive install is **experimental**: meant for an A1200 or any Amiga with Kickstart 2.04+ (a 1.3
+A500 gets the Shell version; installing there is untested). Not yet tried on real hardware: see
+docs/testing-turboview-on-a-real-amiga.md, and please report with Help › How TurboView went on your Amiga.
+
 To rebuild TurboView (the Amiga program; a built copy is included in `turbocat/amiga/`), install
-[vbcc](http://phoenix.owl.de/vbcc/) with the m68k-kick13 target and the
+[vbcc](http://www.compilers.de/vbcc.html) (the ready-built Linux package, vbcc_linux_x64.tar.gz, includes the m68k-kick13 target) with the m68k-kick13 target and the
 [NDK 3.2](https://aminet.net/package/dev/misc/NDK3.2), then run
-`vc +kick13 -O2 -I<NDK>/Include_H -o turbocat/amiga/TurboView amiga/turboview.c`.
+`vasmm68k_mot -Fhunk -m68000 -o inflate_glue.o amiga/inflate_glue.asm` and then
+`vc +kick13 -O2 -I<NDK>/Include_H -o turbocat/amiga/TurboView amiga/turboview.c inflate_glue.o`.
+(`amiga/inflate.asm` is Keir Fraser's 68000 inflate, public domain, from github.com/keirf/amiga-stuff:
+it unpacks the packed file list on TurboView floppies.)
 
 The PySide6 packages must be the same version (`pip list | grep PySide6`).
 
@@ -84,6 +101,10 @@ tc window                  # desktop window: the catalogue with search (Ctrl F)
 Run the commands from inside the `TurboCAT4` folder.
 
 The catalogue is stored in `~/turbocat.db` (change with `--db FILE`).
+
+## Privacy
+
+TurboCAT collects nothing about you: no accounts, analytics or tracking, and your disks and catalogue never leave your computer. [PRIVACY.md](PRIVACY.md) lists what it contacts online and when (the same text is in Help › Privacy).
 
 ## Roadmap
 
