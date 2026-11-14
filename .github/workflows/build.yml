@@ -1,0 +1,119 @@
+# Builds TurboCAT's downloads: a Windows installer (and zip), a macOS .dmg and a Linux AppImage.
+# Runs when started by hand (Actions > Build > Run workflow) or when a version is tagged (v4.0.0...);
+# a tagged build also attaches them to a GitHub release (as a draft, to check before publishing).
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Python packages
+        run: python -m pip install -r requirements.txt pyinstaller pillow
+
+      - name: Version
+        shell: bash
+        run: echo "VERSION=$(python -c 'from turbocat import VERSION; print(VERSION)')" >> "$GITHUB_ENV"
+
+      # ---- the helper programs each package carries (TurboCAT looks in its own bin and lib first)
+      - name: Helpers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 \
+            p7zip-full xdms libopenmpt0 libfuse2
+          mkdir -p packaging/bundle/bin packaging/bundle/lib
+          cp /usr/lib/p7zip/7z packaging/bundle/bin/7z
+          cp /usr/lib/p7zip/7z.so packaging/bundle/bin/ || true
+          cp "$(command -v xdms)" packaging/bundle/bin/xdms
+          cp "$(ldconfig -p | grep -m1 'libopenmpt.so.0 ' | awk '{print $NF}')" packaging/bundle/lib/libopenmpt.so
+
+      - name: Helpers (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p packaging/bundle/bin packaging/bundle/lib
+          cp "/c/Program Files/7-Zip/7z.exe" "/c/Program Files/7-Zip/7z.dll" packaging/bundle/bin/
+          # libopenmpt's own Windows build (0.8 or later plays OctaMED synth sounds)
+          page=$(curl -sSL https://lib.openmpt.org/libopenmpt/download/)
+          zip=$(echo "$page" | grep -o 'files/libopenmpt/bin/libopenmpt-[0-9.]*+release\.bin\.windows\.zip' | head -1)
+          if [ -n "$zip" ]; then
+            curl -sSL -o openmpt.zip "https://lib.openmpt.org/$zip"
+            7z x -y -oopenmpt openmpt.zip > /dev/null
+            find openmpt -path '*amd64*' -name '*.dll' -exec cp {} packaging/bundle/lib/ \;
+            ls packaging/bundle/lib
+          else
+            echo "::warning::libopenmpt's Windows download wasn't found: the package won't play music"
+          fi
+
+      - name: Helpers (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install sevenzip libopenmpt || true
+          mkdir -p packaging/bundle/bin packaging/bundle/lib
+          cp "$(brew --prefix)/bin/7zz" packaging/bundle/bin/7z || echo "::warning::no 7-Zip"
+          cp "$(brew --prefix libopenmpt)/lib/libopenmpt.dylib" packaging/bundle/lib/ || echo "::warning::no libopenmpt"
+
+      - name: Tests first
+        run: python tests/run.py
+
+      - name: Icons
+        run: python packaging/make_icons.py
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm --log-level WARN packaging/turbocat.spec
+
+      # ---- each system's download
+      - name: Windows installer and zip
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          (cd dist && 7z a -tzip "TurboCAT-$VERSION-Windows-portable.zip" TurboCAT > /dev/null)
+          choco install innosetup -y --no-progress > /dev/null
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" -DAppVersion="$VERSION" packaging/turbocat.iss
+
+      - name: macOS disk image
+        if: runner.os == 'macOS'
+        run: hdiutil create -volname "TurboCAT 4" -srcfolder dist/TurboCAT.app -ov -format UDZO "dist/TurboCAT-$VERSION-macOS.dmg"
+
+      - name: Linux AppImage
+        if: runner.os == 'Linux'
+        run: packaging/appimage.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TurboCAT-${{ env.VERSION }}-${{ runner.os }}
+          retention-days: 30
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.dmg
+            dist/*.AppImage
+
+      - name: Attach to the release (tagged builds)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.dmg
+            dist/*.AppImage
