@@ -77,7 +77,10 @@ class FindEmulatorsTest(unittest.TestCase):
         with as_system("mac"), mock.patch.object(emulator.os.path, "expanduser",
                                                  side_effect=lambda p: p.replace("~", self.tmp.name)), \
                 mock.patch.object(emulator.shutil, "which", return_value=None):
-            self.assertEqual(emulator.find_emulators(), {"fs-uae": [app]})
+            found = emulator.find_emulators()
+        # (pretending to be a Mac on Windows mixes "/" and "\\" in the path: compare them as paths)
+        self.assertEqual({k: [os.path.normpath(p) for p in v] for k, v in found.items()},
+                         {"fs-uae": [os.path.normpath(app)]})
 
     def test_winuae_is_started_with_a_settings_file(self):
         with mock.patch.object(paths, "cache_dir", return_value=self.tmp.name):
