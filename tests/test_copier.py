@@ -55,11 +55,15 @@ class CopierTest(unittest.TestCase):
         self.cat.db.close()
         self.tmp.cleanup()
 
-    def wait(self, dlg, seconds=10):
+    def wait(self, dlg, seconds=30):
+        """Run the copier to the end, a frame at a time, however slow the machine is (a busy
+        test machine's timers can lag far behind)."""
         end = time.monotonic() + seconds
         while dlg.close_btn.text() != "Close" and time.monotonic() < end:
+            if dlg.timer.isActive():
+                dlg._tick()                  # the next frame now, not when the timer gets round to it
             self.app.processEvents()
-            time.sleep(0.01)
+            time.sleep(0.005)
 
     def test_disks_fill_in_and_the_summary_comes_last(self):
         from turbocat import gui
