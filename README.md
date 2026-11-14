@@ -32,6 +32,19 @@ See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
 - **Bootblocks** — standard / custom loader / non-DOS, and a warning for code that installs itself in memory (the behaviour of bootblock viruses — some virus killers do this too)
 - **Duplicates** — the same disk catalogued more than once (any format): one copy is shown, the spares are hidden, nothing is deleted; disks that share an archive are noted too
 
+## Downloads (test builds)
+
+GitHub builds ready-to-run packages from this code: **Actions › Build › Run workflow**, or tag a
+version (`v4.0.0`) to attach them to a draft release. Each carries Python, Qt, 7-Zip and libopenmpt:
+
+- **Windows**: `TurboCAT-…-Windows-Setup.exe` (installs for you only, no admin rights), or the
+  portable zip. Windows shows "Windows protected your PC" until the package is signed: More info › Run anyway.
+- **macOS** (Apple Silicon): `TurboCAT-…-macOS.dmg`. Unsigned, so the first time: right-click the app › Open.
+- **Linux**: `TurboCAT-…-x86_64.AppImage`. Make it executable and run it; it includes xdms too.
+
+Not yet in the Windows and macOS packages: xdms (DMS disks; Check setup says how to add it). The
+packages haven't been tried by testers yet.
+
 ## Setup on Linux Mint / Ubuntu
 
 Unzip into your home folder, then in a terminal:
