@@ -5542,6 +5542,7 @@ class MainWindow(QMainWindow):
         self.hide_bar.timeout.connect(self.scan_bar.hide)
         self.live = QTimer(self, interval=4000)      # show new items while a scan runs
         self.live.timeout.connect(self._live_reload)
+        self.live_loader = None                      # reads them in the background (_live_reload)
         self.current_id = None
         self.table.selectionModel().currentRowChanged.connect(self._row_changed)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._selection_changed())
@@ -6650,6 +6651,7 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(self._scan_failed)
         self.worker.finished.connect(self._scan_finished)
         self.worker.start()
+        self.live.setInterval(4000)
         self.live.start()
 
     def _stop_clicked(self):
@@ -6906,8 +6908,26 @@ class MainWindow(QMainWindow):
         self.hide_bar.start()
 
     def _live_reload(self):
-        if self.found_count:
-            self.reload()
+        """While a scan runs, show the new items. Reading a big catalogue takes seconds, so it is
+        read in the background and shown when ready: the window keeps responding (issue: "TurboCAT
+        4 is not responding" during a 74,000-file scan, when reading it took longer than the 4
+        seconds between reloads). The next reload waits twice as long as this one took."""
+        if not self.found_count or self.closing:
+            return
+        if self.live_loader is not None and self.live_loader.isRunning():
+            return
+        loader = ItemsLoader(self.db_path)
+        loader.loaded.connect(lambda items, l=loader: self._live_loaded(l, items))
+        self.live_loader = loader
+        self.live_started = time.monotonic()
+        loader.start()
+
+    def _live_loaded(self, loader, items):
+        if loader is not self.live_loader or self.worker is None or self.closing:
+            return                    # the scan has finished: the reload after it is newer
+        self.reload(items)
+        took = time.monotonic() - self.live_started
+        self.live.setInterval(max(4000, int(2000 * took)))
 
     def _scan_finished(self):
         self.live.stop()
@@ -7218,10 +7238,11 @@ class MainWindow(QMainWindow):
         if cur is not None:
             self.details.show_item(cur)        # a picture was just found for it
 
-    def reload(self):
-        """Re-read the catalogue after a scan, keeping the search and selection."""
+    def reload(self, items=None):
+        """Re-read the catalogue after a scan, keeping the search and selection. items: already
+        read (in the background, see _live_reload)."""
         before = {it.id: (it.pic, it.thumb_icon) for it in self.all_items}
-        self.all_items = load_items(self.cat)
+        self.all_items = items if items is not None else load_items(self.cat)
         self._make_sets()
         if self.pic_worker is None:
             self._fill_counts()
@@ -7304,6 +7325,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "loader", None) is not None and self.loader.isRunning():
             self.loader.wait(15000)          # still reading the catalogue at start-up
         self.closing = True
+        if self.live_loader is not None and self.live_loader.isRunning():
+            self.live_loader.wait(30000)     # reading it while a scan runs (_live_reload)
         self.player_bar.player.stop()
         if self.tv_timer.isActive() and self.worker is None and self.pic_worker is None:
             self.tv_timer.stop()             # favourites just changed: give TurboView them first

@@ -12,6 +12,12 @@ What changed in each release, newest first. Work not yet in a numbered release i
   reloads every few seconds; if the scan added a damaged disk in the moment between two steps of
   working out which disks can be repaired, it stopped with a KeyError. Such a disk now waits for the
   next reload a few seconds later. A test recreates the timing
+- **Fixed: "TurboCAT 4 is not responding" during a big scan.** While a scan runs, the list
+  showed new items by reading the whole catalogue every 4 seconds in the window itself; once the
+  catalogue was big (8,800 items during a 74,000-file TOSEC scan) that took longer than 4 seconds,
+  so the window never got a moment to respond. It is now read in the background, the window only
+  shows the result (a quarter of a second instead of five), and the next reload waits twice as long
+  as the last one took
 - **The Big archives window says where each archive is**: under each name, the folder it is in
   (~/Dropbox/AMIGA), so one in a folder you meant to leave out is easy to spot and untick
 
