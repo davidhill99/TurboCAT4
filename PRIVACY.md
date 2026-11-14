@@ -14,6 +14,7 @@ Only when you use these features:
 | Identify disks online | tosecdev.org and GitHub (the libretro database) | Nothing about your disks: it downloads the whole list of known Amiga disks and matches the checksums on your computer. |
 | Look on Aminet for missing files | aminet.net | The names of the damaged files it looks for. It downloads only files with exactly the same name and size. |
 | Report a problem, Suggest an idea | GitHub, through your own web browser | Only what the form shows you under “What will be sent”, and only if you submit it there. Your home folder is shown as ~ and your user name is taken out first. |
+| Support TurboCAT (Ko-fi) | ko-fi.com, through your own web browser | Nothing: it only opens TurboCAT's Ko-fi page. Anything you give is between you and Ko-fi (and PayPal or Stripe); TurboCAT never sees it. |
 
 ## What it never does
 

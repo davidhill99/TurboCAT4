@@ -8,3 +8,4 @@ VERSION = "4.0.0-beta.1"
 APP_NAME = "TurboCAT 4"
 CONTACT = "tcpturbocat@gmail.com"     # TurboCAT's public email (not anyone's own)
 LICENCE = "GPL-3.0-or-later"
+DONATE = "https://ko-fi.com/tcpturbocat"   # Help › Support TurboCAT (Ko-fi)

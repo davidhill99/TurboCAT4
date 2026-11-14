@@ -126,6 +126,8 @@ Keir Fraser's public-domain 68000 inflate in TurboView.
 
 Contact: **tcpturbocat@gmail.com** (or Help › Report a problem / Suggest an idea in TurboCAT).
 
+**Support TurboCAT:** it's free, and always will be. If it's helped you, you can buy its author a coffee at [ko-fi.com/tcpturbocat](https://ko-fi.com/tcpturbocat) (also Help › Support TurboCAT 4…).
+
 ## Privacy
 
 TurboCAT collects nothing about you: no accounts, analytics or tracking, and your disks and catalogue never leave your computer. [PRIVACY.md](PRIVACY.md) lists what it contacts online and when (the same text is in Help › Privacy).

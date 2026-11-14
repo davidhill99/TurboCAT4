@@ -29,6 +29,10 @@ ONLINE = [
      "GitHub, through your own web browser",
      "Only what the form shows you under “What will be sent”, and only if you submit it "
      "there. Your home folder is shown as ~ and your user name is taken out first."),
+    ("Support TurboCAT (Ko-fi)",
+     "ko-fi.com, through your own web browser",
+     "Nothing: it only opens TurboCAT's Ko-fi page. Anything you give is between you and Ko-fi "
+     "(and PayPal or Stripe); TurboCAT never sees it."),
 ]
 
 NEVER = [

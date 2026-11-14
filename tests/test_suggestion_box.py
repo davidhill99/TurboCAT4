@@ -50,6 +50,13 @@ class SuggestionBoxTest(unittest.TestCase):
         btn.click()
         self.assertEqual(self.ideas, ["idea"])
 
+    def test_about_and_help_link_to_ko_fi(self):
+        from turbocat import DONATE
+        dlg = self.gui.AboutDialog(self.w, self.w.cat, self.w.db_path)
+        self.assertIn(DONATE, dlg.findChild(self.gui.QLabel, "supportLink").text())
+        help_menu = next(a.menu() for a in self.w.menuBar().actions() if a.text() == "&Help")
+        self.assertTrue(any(a.text().startswith("&Support") for a in help_menu.actions()))
+
     def test_the_reminder_comes_once_after_ten_starts(self):
         shown = []
         with mock.patch.object(self.gui.QTimer, "singleShot", lambda ms, fn: shown.append(fn)), \

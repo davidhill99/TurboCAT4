@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
                                QTableView, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
-from . import APP_NAME, CONTACT, LICENCE, VERSION
+from . import APP_NAME, CONTACT, DONATE, LICENCE, VERSION
 from . import aminet, diskmap, drivesound, explain, feedback, paths, privacy, madepics, readers, repair, stats
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
@@ -5041,6 +5041,15 @@ class AboutDialog(QDialog):
                                 f"({LICENCE}). Contact: {CONTACT}", ui_font(12), "muted"))
         v.addWidget(_wrap_label("Ideas are welcome: tell the people working on TurboCAT what you'd like it "
                                 "to do, or what didn't work.", ui_font(12), "muted"))
+        support = QLabel(f"TurboCAT is free. If it's helped you, you can "
+                         f"<a href='{DONATE}' style='color:{C['accent'].name()}'>buy its author a coffee on "
+                         f"Ko-fi</a>.")
+        support.setObjectName("supportLink")
+        support.setFont(ui_font(12))
+        support.setWordWrap(True)
+        support.setTextFormat(Qt.TextFormat.RichText)
+        support.setOpenExternalLinks(True)
+        v.addWidget(support)
 
         buttons = QHBoxLayout()
         win = parent if hasattr(parent, "report") else None
@@ -5638,6 +5647,9 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         add(m, f"&About {APP_NAME}", self.show_about, "F1")
         add(m, f"{APP_NAME} on &GitHub", lambda: QDesktopServices.openUrl(QUrl(AboutDialog.REPO)))
+        add(m, f"&Support {APP_NAME}…", lambda: QDesktopServices.openUrl(QUrl(DONATE)), None,
+            "TurboCAT is free. If it's helped you, you can buy its author a coffee on Ko-fi "
+            "(opens in your web browser)")
         self._selection_changed()
         # Right-click on the list: the Disk menu's commands for what is selected
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

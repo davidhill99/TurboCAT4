@@ -7,6 +7,9 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## 4.0.0-beta.1 — first public test release (not yet published)
 
+- **Support TurboCAT**: TurboCAT stays free; Help › Support TurboCAT 4… and a line in the About box
+  open its Ko-fi page (ko-fi.com/tcpturbocat) in your browser. It is also in the README, the
+  Aminet readme and GitHub's Sponsor button, and Help › Privacy says it sends nothing
 - **DMS disks work in the Windows and macOS packages too**: xdms 1.3.2 (public domain) is compiled
   from its official source in each build (checked by its SHA-256) and carried inside, so every package
   now reads LHA, DMS and music without installing anything. A new test packs a disk as a genuine DMS
