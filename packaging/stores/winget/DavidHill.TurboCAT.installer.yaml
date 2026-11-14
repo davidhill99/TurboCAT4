@@ -7,6 +7,6 @@ UpgradeBehavior: install
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/davidhill99/TurboCAT4/releases/download/v4.0.0-beta.1/TurboCAT-4.0.0-beta.1-Windows-Setup.exe
-    InstallerSha256: FILL-IN-AFTER-RELEASE
+    InstallerSha256: D3EAB08DC896496A09940DEEEE768A5A7528163B68B725DF804F1A8392D4A95A
 ManifestType: installer
 ManifestVersion: 1.6.0

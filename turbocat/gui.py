@@ -3327,6 +3327,14 @@ class PlayerBar(QFrame):
 
 # ---------------------------------------------------------------- pictures
 
+def _has_disks(cat):
+    """True once anything is catalogued (a new user's catalogue is empty)."""
+    try:
+        return cat.db.execute("SELECT 1 FROM media LIMIT 1").fetchone() is not None
+    except Exception:
+        return True
+
+
 class TurboViewWorker(QThread):
     """Rewrite TurboView's catalogue files, off the window's thread (it takes a few seconds)."""
 
@@ -3338,6 +3346,8 @@ class TurboViewWorker(QThread):
     def run(self):
         try:
             cat = Catalogue(self.db_path)
+            if not _has_disks(cat):       # nothing to list: don't make TurboView's folder yet
+                return
             folder = cat.get_meta("turboview_dir") or turboview.default_folder()
             turboview.export(cat, load_items(cat), folder)
         except Exception:
@@ -3409,7 +3419,7 @@ class PictureWorker(QThread):
                 res["drawn"] = madepics.make(
                     cat, set(games.classify(cat)),
                     lambda i, n, m: self.progress.emit("drawing", i, n, name(m)), stop)
-            if not self.stop_wanted:          # keep the Amiga's copy of the catalogue up to date
+            if not self.stop_wanted and _has_disks(cat):   # keep the Amiga's copy up to date
                 try:
                     folder = cat.get_meta("turboview_dir") or turboview.default_folder()
                     turboview.install(folder)
@@ -5381,6 +5391,7 @@ class MainWindow(QMainWindow):
         self.message.setWordWrap(True)
         self.message.setFont(ui_font(15))
         self.message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.welcome = self._make_welcome()
 
         self.tune_model = TuneModel()
         self.tune_proxy = QSortFilterProxyModel(self)
@@ -5415,6 +5426,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.addWidget(self.table)
         self.stack.addWidget(self.message)
+        self.stack.addWidget(self.welcome)
         self.stack.addWidget(self.tunes_table)
         panel = QFrame()
         panel.setObjectName("panel")
@@ -5833,6 +5845,58 @@ class MainWindow(QMainWindow):
             r, _ = self.tune_model.rows[self.tune_proxy.mapToSource(index).row()]
             self._star_tunes([r])
 
+    def _make_welcome(self):
+        """What an empty catalogue shows (a new user's first start): what TurboCAT does and one
+        button to begin, instead of an empty list."""
+        w = QWidget()
+        w.setObjectName("welcome")
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(30, 30, 30, 30)
+        row = QHBoxLayout()
+        col = QWidget()
+        col.setMaximumWidth(560)
+        v = QVBoxLayout(col)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(12)
+        row.addStretch(1)
+        row.addWidget(col, 4)
+        row.addStretch(1)
+        outer.addStretch(1)
+        outer.addLayout(row)
+        outer.addStretch(2)
+
+        def label(text, size, name=None, weight=QFont.Weight.Normal, rich=False):
+            lab = QLabel(text)
+            if name:
+                lab.setObjectName(name)
+            lab.setFont(ui_font(size, weight))
+            lab.setWordWrap(True)
+            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if rich:
+                lab.setTextFormat(Qt.TextFormat.RichText)
+            v.addWidget(lab)
+            return lab
+
+        label(f"Welcome to {APP_NAME}", 22, "welcomeHead", QFont.Weight.Bold)
+        label("Choose the folder where you keep your Amiga disk images (ADF, DMS, LHA, ZIP…). "
+              "TurboCAT reads every disk in it, and in the folders inside it, so you can search, "
+              "play and copy them. Your files are only read, never changed.", 14)
+        v.addSpacing(6)
+        go = QPushButton("Choose your Amiga folder…")
+        go.setObjectName("primary")
+        go.setFont(ui_font(15, QFont.Weight.DemiBold))
+        go.setMinimumHeight(44)
+        go.clicked.connect(self.scan_folder)
+        v.addWidget(go, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.welcome_btn = go
+        v.addSpacing(6)
+        more = label("Later, Scan › Scan folder… adds more folders. To play disks you'll need an "
+                     f"emulator and Kickstart ROMs: <a href='setup' style='color:{C['accent'].name()}'>"
+                     "Check setup</a> says what's "
+                     "installed.", 12, "welcomeMore", rich=True)
+        more.linkActivated.connect(lambda _l: self.check_setup())
+        return w
+
     def _update_turboview(self):
         """Write TurboView's copy of the catalogue (with the favourites), in the background."""
         if self.tv_worker is not None or self.pic_worker is not None or self.worker is not None:
@@ -6001,6 +6065,9 @@ class MainWindow(QMainWindow):
         self._show_setup_status(self.setup_features(checks))
         missing = sorted(c.name for c in checks if c.status != setupcheck.OK and c.important)
         if missing and missing != self.cat.get_meta("setup_seen"):
+            if not _has_disks(self.cat):
+                self.setup_after_scan = True    # a new user sees the welcome first; the report
+                return                          # comes once there are disks it matters for
             self.check_setup()
 
     IDEA_NUDGE_AT = 10            # starts before the one-off reminder of the suggestion box
@@ -6832,6 +6899,9 @@ class MainWindow(QMainWindow):
         self.details.recheck_btn.setEnabled(True)
         if not self.closing:
             self.find_pictures()
+            if getattr(self, "setup_after_scan", False) and _has_disks(self.cat):
+                self.setup_after_scan = False
+                QTimer.singleShot(1500, self._setup_on_start)
 
     # -------------------------------------------------------------- pictures
     def find_pictures(self, online=None, asked=False):
@@ -7443,11 +7513,11 @@ class MainWindow(QMainWindow):
         if not self.all_items and self.loading:
             self.message.setText("Opening the catalogue…")
             self.stack.setCurrentWidget(self.message)
-        elif not self.all_items:
-            self.message.setText(
-                "The catalogue is empty.\n\nClick Scan folder… and choose the folder where you "
-                "keep your Amiga disk images.")
+        elif not self.all_items and self.worker is not None:
+            self.message.setText("Reading your disks…\n\nThey appear here as they are read.")
             self.stack.setCurrentWidget(self.message)
+        elif not self.all_items:
+            self.stack.setCurrentWidget(self.welcome)
         elif music_view and self.tune_view:
             self._fill_tunes(text)
         elif not shown and text and self.filter != "all":
@@ -7562,6 +7632,8 @@ class MainWindow(QMainWindow):
             QLabel {{ color: {c['ink']}; }}
             QLabel#muted {{ color: {c['ink-muted']}; }}
             QLabel#message {{ color: {c['ink-muted']}; background: {c['surface']}; padding: 40px; }}
+            QWidget#welcome {{ background: {c['surface']}; }}
+            QLabel#welcomeMore {{ color: {c['ink-muted']}; }}
             #header {{ border-bottom: 1px solid {c['line']}; background: {c['surface']}; }}
             #footer {{ background: {c['chrome']}; border-top: 1px solid {c['line']}; }}
             #searchBox {{ border: 2px solid {c['accent']}; border-radius: 8px; background: {c['surface']}; }}

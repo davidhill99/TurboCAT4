@@ -7,6 +7,12 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## 4.0.0-beta.1 — first public test release (not yet published)
 
+- **A welcome on the first start**: an empty catalogue shows "Welcome to TurboCAT 4" with one
+  button, Choose your Amiga folder…, instead of an empty list. The setup report no longer opens over
+  it: if something important is missing it comes once after the first scan, when there are disks it
+  matters for (the Setup button shows the warning sign meanwhile). During that first scan the list
+  says the disks are being read. TurboView's folder (~/TurboCAT-Amiga) is made only once something is
+  catalogued, not the moment TurboCAT first opens
 - **A README for users**: the README now starts with what TurboCAT 4 does, TurboView, and the
   downloads; running from source, the command line and rebuilding TurboView follow at the end
 - **Auf Deutsch**: a German README (LIESMICH.md, linked at the top of the README) and German lines in

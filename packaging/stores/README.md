@@ -1,8 +1,9 @@
 # Getting TurboCAT into the stores (prepared, not yet submitted)
 
-Each store points at the files of a published GitHub release, so first publish the release
-(tag `v4.0.0-beta.1`, check the draft, publish), then fill in the **SHA256** lines below from its files
-(`sha256sum TurboCAT-*`), then submit. Nothing here has been submitted yet.
+Each store points at the files of a published GitHub release. The SHA256 lines are filled in for
+**4.0.0-beta.1** from the draft release's SHA256SUMS.txt, so once that release is published these are
+ready to submit. For a later release, take the numbers from its SHA256SUMS.txt. Nothing here has been
+submitted yet.
 
 | Store | What to submit | Where |
 |---|---|---|
