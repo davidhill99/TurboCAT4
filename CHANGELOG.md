@@ -7,6 +7,10 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## Unreleased
 
+- **DMS disks work in the Windows and macOS packages too**: xdms 1.3.2 (public domain) is compiled
+  from its official source in each build (checked by its SHA-256) and carried inside, so every package
+  now reads LHA, DMS and music without installing anything. A new test packs a disk as a genuine DMS
+  and checks it unpacks exactly, on every system, with the copy that ships
 - **Ready-to-run packages, built by GitHub**: a Windows installer (per user, no admin) and portable
   zip, macOS .dmg files for Apple Silicon and Intel Macs, and a Linux AppImage, each with Python, Qt, 7-Zip and libopenmpt
   inside (and xdms on Linux). Built on demand or when a version is tagged (then attached to a draft
