@@ -13,7 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-22.04]
+        # macos-latest is Apple Silicon (arm64); macos-15-intel makes the build for Intel Macs
+        os: [windows-latest, macos-latest, macos-15-intel, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +92,10 @@ jobs:
 
       - name: macOS disk image
         if: runner.os == 'macOS'
-        run: hdiutil create -volname "TurboCAT 4" -srcfolder dist/TurboCAT.app -ov -format UDZO "dist/TurboCAT-$VERSION-macOS.dmg"
+        run: |
+          if [ "$(uname -m)" = "arm64" ]; then kind=AppleSilicon; else kind=Intel; fi
+          hdiutil create -volname "TurboCAT 4" -srcfolder dist/TurboCAT.app -ov -format UDZO \
+            "dist/TurboCAT-$VERSION-macOS-$kind.dmg"
 
       - name: Linux AppImage
         if: runner.os == 'Linux'
@@ -99,7 +103,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TurboCAT-${{ env.VERSION }}-${{ runner.os }}
+          name: TurboCAT-${{ env.VERSION }}-${{ runner.os }}-${{ runner.arch }}
           retention-days: 30
           path: |
             dist/*.exe
