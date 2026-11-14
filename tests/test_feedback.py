@@ -3,6 +3,7 @@ the GitHub link carries the form's fields, a huge error still fits, and errors r
 import os
 import sys
 import unittest
+import qt_cleanup  # noqa: F401  (deletes leftover windows before Qt shuts down)
 import urllib.parse
 from unittest import mock
 
@@ -66,6 +67,15 @@ class FeedbackDialogTest(unittest.TestCase):
         from turbocat import gui
         cls.app = QApplication.instance() or QApplication([])
         gui._pick_theme()
+
+    def tearDown(self):
+        """Delete the test's forms now: left to Python's shutdown, Qt crashes on the way out."""
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QDialog
+        for w in self.app.topLevelWidgets():
+            if isinstance(w, QDialog):
+                w.deleteLater()
+        self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
 
     def test_the_form_shows_what_will_be_sent(self):
         from turbocat import gui

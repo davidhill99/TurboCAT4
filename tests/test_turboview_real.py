@@ -3,6 +3,7 @@ full files for a hard drive, and the window that makes them and copies the flopp
 import os
 import tempfile
 import unittest
+import qt_cleanup  # noqa: F401  (deletes leftover windows before Qt shuts down)
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

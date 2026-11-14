@@ -3,6 +3,7 @@ Shell listing; and what kind of utility a disk is, for its generic picture."""
 import os
 import struct
 import unittest
+import qt_cleanup  # noqa: F401  (deletes leftover windows before Qt shuts down)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QGuiApplication, QImage  # noqa: E402

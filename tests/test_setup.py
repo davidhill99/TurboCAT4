@@ -144,4 +144,4 @@ class GuideTest(unittest.TestCase):
                      "Amiga emulator", "xdms", "lha (lhasa)", "List of Amiga disks"):
             g = setup.guide(name)
             self.assertIn("What to do", g, name)
-        self.assertIn("Kickstarts", setup.guide("Kickstart ROMs"))      # where the ROM files go
+        self.assertIn("Where Kickstart files go", setup.guide("Kickstart ROMs"))      # where the ROMs go

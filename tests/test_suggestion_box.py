@@ -3,6 +3,7 @@ in About, and one reminder (only one) after ten starts."""
 import os
 import tempfile
 import unittest
+import qt_cleanup  # noqa: F401  (deletes leftover windows before Qt shuts down)
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

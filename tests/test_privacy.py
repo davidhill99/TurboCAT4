@@ -3,6 +3,7 @@ disagree), every site TurboCAT contacts is named in it, and the window and links
 import os
 import re
 import unittest
+import qt_cleanup  # noqa: F401  (deletes leftover windows before Qt shuts down)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
