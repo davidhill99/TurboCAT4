@@ -1,0 +1,49 @@
+# Flatpak manifest (DRAFT: not yet built with flatpak-builder). Flathub builds from source, on the
+# KDE runtime with the PySide6 base app that carries Qt for Python.
+app-id: io.github.davidhill99.TurboCAT
+runtime: org.kde.Platform
+runtime-version: "6.9"
+sdk: org.kde.Sdk
+base: io.qt.PySide.BaseApp
+base-version: "6.9"
+command: turbocat
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio          # music
+  - --device=dri
+  - --share=network              # pictures, disk lists, Aminet (only when asked)
+  - --filesystem=home            # the folders you scan, and Gotek sticks under /media
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --talk-name=org.freedesktop.Flatpak   # to start Amiberry (itself a Flatpak) with flatpak-spawn
+modules:
+  - name: python-deps
+    buildsystem: simple
+    build-commands:
+      - pip3 install --no-index --find-links=. --prefix=/app amitools lhafile
+    sources: []                  # fill in with flatpak-pip-generator amitools==0.9.0 lhafile==0.3.1
+  - name: xdms
+    buildsystem: simple
+    build-commands:
+      - cc -O2 -w -DINLINE=static -DVERSION='"1.3.2"' -o /app/bin/xdms src/*.c
+    sources:
+      - type: archive
+        url: https://zakalwe.fi/~shd/foss/xdms/xdms-1.3.2.tar.bz2
+        sha256: 367ec4f02dd6a3a225b4338ea7b961b87fb144f7388b2ea1eb3a5593fc53f47e
+  - name: turbocat
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/turbocat && cp -a turbocat /app/lib/turbocat/
+      - printf '#!/bin/sh\nexec python3 -m turbocat "$@"\n' > /app/bin/turbocat && chmod +x /app/bin/turbocat
+      - install -Dm644 packaging/stores/flathub/io.github.davidhill99.TurboCAT.desktop -t /app/share/applications
+      - install -Dm644 packaging/stores/flathub/io.github.davidhill99.TurboCAT.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 turbocat/icons/mark.svg /app/share/icons/hicolor/scalable/apps/io.github.davidhill99.TurboCAT.svg
+    build-options:
+      env:
+        PYTHONPATH: /app/lib/turbocat
+    sources:
+      - type: git
+        url: https://github.com/davidhill99/TurboCAT4.git
+        tag: v4.0.0-beta.1

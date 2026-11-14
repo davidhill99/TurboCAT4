@@ -1,0 +1,19 @@
+PackageIdentifier: DavidHill.TurboCAT
+PackageVersion: 4.0.0-beta.1
+PackageLocale: en-US
+Publisher: David Hill
+PublisherUrl: https://github.com/davidhill99
+PublisherSupportUrl: https://github.com/davidhill99/TurboCAT4/issues
+PackageName: TurboCAT 4
+PackageUrl: https://github.com/davidhill99/TurboCAT4
+License: GPL-3.0-or-later
+LicenseUrl: https://github.com/davidhill99/TurboCAT4/blob/main/LICENSE
+ShortDescription: Catalogue, search and repair your Amiga disk images, and take the catalogue to a real Amiga.
+Description: >-
+  TurboCAT 4 catalogues Amiga disk images, archives and folders: what is on every disk, which are games,
+  which have problems or duplicates, their pictures and their music. It repairs damaged disks from your
+  own collection, plays disks in an emulator, copies them to a Gotek, and makes TurboView floppies to
+  look things up on a real Amiga. A revival of TurboCAT and TurboCAT-Pro (1994-1996).
+Tags: [amiga, emulator, catalogue, adf, gotek, retro]
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

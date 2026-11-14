@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TurboCAT 4
+Comment=Catalogue, search and repair Amiga disk images
+Exec=turbocat window
+Icon=io.github.davidhill99.TurboCAT
+Terminal=false
+Categories=Utility;Archiving;
+StartupWMClass=turbocat4

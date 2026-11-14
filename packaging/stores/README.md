@@ -1,0 +1,14 @@
+# Getting TurboCAT into the stores (prepared, not yet submitted)
+
+Each store points at the files of a published GitHub release, so first publish the release
+(tag `v4.0.0-beta.1`, check the draft, publish), then fill in the **SHA256** lines below from its files
+(`sha256sum TurboCAT-*`), then submit. Nothing here has been submitted yet.
+
+| Store | What to submit | Where |
+|---|---|---|
+| **winget** (Windows) | the three files in `winget/` | a pull request to github.com/microsoft/winget-pkgs (path `manifests/d/DavidHill/TurboCAT/4.0.0-beta.1/`); `wingetcreate` can do it |
+| **Homebrew** (macOS) | `homebrew/Casks/turbocat.rb` | a tap of your own: a public repo **davidhill99/homebrew-turbocat** with this file in `Casks/`. People then run `brew install --cask davidhill99/turbocat/turbocat`. (Homebrew's main list won't take unsigned apps.) |
+| **Flathub** (Linux) | the files in `flathub/` | a pull request to github.com/flathub/flathub (new-app branch), following docs.flathub.org/docs/for-app-authors/submission. Flathub builds from source; the manifest needs trying with `flatpak-builder` first. |
+| **Aminet** (Amiga) | TurboView + `aminet/TurboView.readme` | upload `TurboView.lha` and the readme at aminet.net/upload (or by FTP) |
+
+Contact address used throughout: tcpturbocat@gmail.com.

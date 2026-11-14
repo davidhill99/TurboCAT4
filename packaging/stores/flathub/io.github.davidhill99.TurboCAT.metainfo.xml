@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.davidhill99.TurboCAT</id>
+  <name>TurboCAT 4</name>
+  <summary>Catalogue, search and repair Amiga disk images</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.davidhill99"><name>David Hill</name></developer>
+  <url type="homepage">https://github.com/davidhill99/TurboCAT4</url>
+  <url type="bugtracker">https://github.com/davidhill99/TurboCAT4/issues</url>
+  <url type="contact">mailto:tcpturbocat@gmail.com</url>
+  <description>
+    <p>TurboCAT 4 catalogues your Amiga disk images, archives and folders: what is on every disk,
+    which are games, which have problems or duplicates, their pictures and their music.</p>
+    <p>It repairs damaged disks from copies in your own collection, plays disks in Amiberry or
+    FS-UAE, copies them to a Gotek, and makes TurboView floppies to look things up on a real Amiga.
+    A revival of TurboCAT and TurboCAT-Pro (1994-1996).</p>
+  </description>
+  <launchable type="desktop-id">io.github.davidhill99.TurboCAT.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="4.0.0-beta.1" date="2026-11-14" type="development"/>
+  </releases>
+</component>

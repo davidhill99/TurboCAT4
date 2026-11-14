@@ -1,0 +1,12 @@
+PackageIdentifier: DavidHill.TurboCAT
+PackageVersion: 4.0.0-beta.1
+InstallerType: inno
+Scope: user
+InstallModes: [interactive, silent]
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/davidhill99/TurboCAT4/releases/download/v4.0.0-beta.1/TurboCAT-4.0.0-beta.1-Windows-Setup.exe
+    InstallerSha256: FILL-IN-AFTER-RELEASE
+ManifestType: installer
+ManifestVersion: 1.6.0

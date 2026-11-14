@@ -1,0 +1,24 @@
+Short:        Search your TurboCAT 4 Amiga collection catalogue
+Author:       David Hill (tcpturbocat@gmail.com)
+Uploader:     tcpturbocat@gmail.com (David Hill)
+Type:         disk/misc
+Version:      4.0 alpha 7
+Architecture: m68k-amigaos >= 1.3.0
+Distribution: Aminet
+License:      GPL-3.0-or-later
+
+TurboView 4 is the Amiga side of TurboCAT 4, the revival of TurboCAT and TurboCAT-Pro
+(1994-1996). TurboCAT 4 runs on Windows, macOS and Linux and catalogues your Amiga disk
+images; TurboView lets you search that catalogue on a real Amiga, to find which disk or
+Gotek image holds the game or tool you want.
+
+- Runs on any Amiga, Kickstart 1.3 or later (a window on Workbench from 2.04, the Shell
+  on 1.3); a Workbench tool with its own icon and tooltypes.
+- TurboCAT makes two TurboView floppies for you (for a Gotek or real disks): disk 1 with
+  every disk and what is on it, disk 2 with a quick name index. Or install it on a hard
+  drive with: TurboView:TurboView INSTALL DH0:TurboCAT
+- An installed TurboView offers to update itself when newer TurboView disks are in a drive.
+
+TurboCAT 4 and its source: https://github.com/davidhill99/TurboCAT4
+Includes Keir Fraser's public-domain 68000 inflate (github.com/keirf/amiga-stuff).
+New and still being tested on real Amigas: reports are very welcome.
