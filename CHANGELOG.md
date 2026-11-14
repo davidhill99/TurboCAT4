@@ -5,6 +5,16 @@ Author: David Hill
 What changed in each release, newest first. Work not yet in a numbered release is under
 **Unreleased**.
 
+## Unreleased (for the next beta)
+
+- **Fixed: TurboCAT stopped with an error during a long scan**
+  ([issue #1](https://github.com/davidhill99/TurboCAT4/issues/1)). While a scan runs, the list
+  reloads every few seconds; if the scan added a damaged disk in the moment between two steps of
+  working out which disks can be repaired, it stopped with a KeyError. Such a disk now waits for the
+  next reload a few seconds later. A test recreates the timing
+- **The Big archives window says where each archive is**: under each name, the folder it is in
+  (~/Dropbox/AMIGA), so one in a folder you meant to leave out is easy to spot and untick
+
 ## 4.0.0-beta.1 — first public test release (14 November 2026)
 
 - **A welcome on the first start**: an empty catalogue shows "Welcome to TurboCAT 4" with one

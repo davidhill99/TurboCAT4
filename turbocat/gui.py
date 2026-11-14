@@ -1062,6 +1062,12 @@ class WrapLabel(QLabel):
         self._fit()
 
 
+def _home_short(path):
+    """The path with the home folder written as ~ (~/Dropbox/AMIGA)."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if folders.within(path, home) else path
+
+
 def _wrap_label(text="", font=None, obj=None):
     lab = WrapLabel(text)
     lab.setWordWrap(True)
@@ -6716,6 +6722,15 @@ class MainWindow(QMainWindow):
             cb.setChecked(True)
             cb.setToolTip(path)
             bl.addWidget(cb)
+            # where it is, so one in a folder you meant to leave out is easy to spot
+            where = QLabel()
+            where.setObjectName("muted")
+            where.setIndent(cb.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth) + 8)
+            where.setText(where.fontMetrics().elidedText(
+                "in " + _home_short(os.path.dirname(path)), Qt.TextElideMode.ElideMiddle, 520))
+            where.setToolTip(path)
+            bl.addWidget(where)
+            bl.addSpacing(4)
             checks.append((cb, path, size))
         if n > 8:
             area = QScrollArea()

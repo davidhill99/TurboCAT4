@@ -5,6 +5,7 @@ import io
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 from amitools.fs.ADFSVolume import ADFSVolume
 from amitools.fs.FSString import FSString
@@ -119,6 +120,25 @@ class RepairTest(unittest.TestCase):
         self.assertEqual([p.source_file for p in plans.values()], ["Utils (1990)(PD)[b].adf"])
         res = repair.build(self.cat, next(iter(plans.values())), out_dir=self.out, log=self.log)
         self.assertEqual(repair.copies_of(self.log), {"Utils (1990)(PD)[b].adf": [res.sha1]})
+
+    def test_plan_all_while_a_scan_adds_a_damaged_disk(self):
+        """Issue #1: a scan running alongside added a damaged disk after the item tree was read,
+        and planning stopped with a KeyError. The new disk now waits for the next reload."""
+        real_index = repair.Index
+        late = os.path.join(self.disks, "Late (1991)(PD)[b].adf")
+
+        def index_then_scan(cat):
+            ix = real_index(cat)
+            with open(late, "wb") as f:
+                f.write(damage(make_adf("Late", {"c/Type": TOOL}), TOOL))
+            scanner.scan([self.disks], self.cat, progress=None)
+            return ix
+
+        with unittest.mock.patch.object(repair, "Index", index_then_scan):
+            plans = repair._plan_all(self.cat)
+        self.assertEqual([p.source_file for p in plans.values()], ["Utils (1990)(PD)[b].adf"])
+        names = sorted(p.source_file for p in repair._plan_all(self.cat).values())
+        self.assertEqual(names, ["Late (1991)(PD)[b].adf", "Utils (1990)(PD)[b].adf"])
 
     def test_an_unreadable_source_falls_back_to_another_copy(self):
         with open(os.path.join(self.disks, "Extras.adf"), "wb") as f:

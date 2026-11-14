@@ -270,8 +270,11 @@ def plan_all(cat, top_ids=None):
 def _plan_all(cat, top_ids=None):
     ix = Index(cat)
     if top_ids is None:
+        # a scan still running can add a disk between reading the tree and this query: it is
+        # planned on the next reload, since the catalogue's stamp has changed by then (issue #1)
         bad = {ix.top[r["id"]] for r in cat.db.execute(
-            "SELECT id FROM media WHERE kind IN ('adf','adz','dms') AND problems LIKE '%file unreadable%'")}
+            "SELECT id FROM media WHERE kind IN ('adf','adz','dms') AND problems LIKE '%file unreadable%'")
+            if r["id"] in ix.top}
         top_ids = sorted(bad)
     out = {}
     for t in top_ids:
