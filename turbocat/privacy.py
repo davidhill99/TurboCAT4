@@ -5,7 +5,7 @@ Keep it true: when a feature starts contacting a new site, or sends something ne
 """
 import html
 
-UPDATED = "14 November 2026"
+UPDATED = "15 November 2026"
 
 INTRO = ("TurboCAT collects nothing about you. There are no accounts, no analytics, no tracking and "
          "no usage statistics. Your disk images, your file lists and your catalogue never leave your "
@@ -17,6 +17,13 @@ ONLINE = [
      "GitHub (the libretro-thumbnails collection) and the Internet Archive",
      "The titles of games and the names of magazines it looks up. Once you switch it on, new "
      "disks are looked up after each scan; Tools › Find pictures online is where it starts."),
+    ("Find out about games online",
+     "Wikidata and Wikipedia",
+     "Nothing about your disks to Wikidata: it downloads its whole list of Amiga games and "
+     "programs and matches the names on your computer. Wikipedia is asked for the article of each "
+     "title found, by its title. Once you switch it on, new disks are looked up after each scan. "
+     "Links to Hall of Light, Lemon Amiga and MobyGames only open in your web browser if you "
+     "click them."),
     ("Identify disks online",
      "tosecdev.org and GitHub (the libretro database)",
      "Nothing about your disks: it downloads the whole list of known Amiga disks and matches the "
@@ -36,7 +43,7 @@ ONLINE = [
 ]
 
 NEVER = [
-    "Nothing is sent in the background unless you started it (or switched it on, as with pictures).",
+    "Nothing is sent in the background unless you started it (or switched it on, as with pictures and game information).",
     "No disk images, file lists, catalogue or checksums are sent anywhere.",
     "Error reports are never sent by themselves: TurboCAT shows you the report and you decide.",
 ]
@@ -45,7 +52,7 @@ KEPT = [
     ("Your catalogue", "where you chose (normally ~/turbocat.db on Linux; AppData\\Roaming\\TurboCAT on "
                        "Windows; Library/Application Support/TurboCAT on macOS), with safety copies in a "
                        "folder beside it"),
-    ("Pictures, disk lists and Aminet files it downloaded", "~/.cache/turbocat on Linux; "
+    ("Pictures, disk lists, game information and Aminet files it downloaded", "~/.cache/turbocat on Linux; "
                                                             "AppData\\Local\\TurboCAT on Windows; "
                                                             "Library/Caches/TurboCAT on macOS"),
     ("Logs of repaired copies and renamed files", "~/.local/share/turbocat on Linux; beside the "

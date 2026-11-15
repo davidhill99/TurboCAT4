@@ -31,11 +31,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QTableView, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetItem)
 
 from . import APP_NAME, CONTACT, DONATE, LICENCE, VERSION
-from . import aminet, diskmap, drivesound, explain, feedback, paths, privacy, madepics, readers, repair, stats
+from . import aminet, background, diskmap, drivesound, explain, feedback, paths, privacy, madepics, readers, repair, stats
 from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
-from . import coverdisks, datlists, folders, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
+from . import coverdisks, datlists, folders, gameinfo, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
 from .scanner import BIG_ARCHIVE, recheck, rescan_all, scan
+from .jobs import InfoWorker, PictureWorker
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -229,21 +230,56 @@ class Item:
     repaired: bool = False      # a repaired copy TurboCAT made (not an original dump)
     rebuild: tuple = ()         # (damaged files that can be put back, damaged files): repair.plan
     repaired_copy: int = 0      # the id of a repaired copy TurboCAT made of this damaged disk
+    about: str = ""             # its Wikidata entry, when the game or utility was found (gameinfo)
     search_blob: str = field(default="", repr=False)
 
 
-def load_items(cat):
+# How far through load_items each step is, from timing a 78,000-item catalogue (38 s): for the
+# progress bar while a big catalogue opens.
+LOAD_STEPS = {"start": 0.0, "games": 0.03, "lists": 0.19, "identify": 0.25, "repairs": 0.33,
+              "items": 0.55, "versions": 0.92, "done": 1.0}
+LOAD_SAYS = {"start": "Reading the list of items", "games": "Sorting out which are games",
+             "lists": "Matching disks to the collections they belong to",
+             "identify": "Identifying disks by their checksums",
+             "repairs": "Working out which damaged disks can be repaired",
+             "items": "Putting the list together", "versions": "Grouping copies, sets and versions",
+             "done": "Done"}
+
+
+def _seconds(t):
+    """'25 seconds', '1 minute 10 seconds' (rounded to 5 seconds, for a time left)."""
+    t = max(5, int(round(t / 5.0)) * 5)
+    if t < 60:
+        return f"{t} seconds"
+    m, sec = divmod(t, 60)
+    return f"{m} minute{'s' if m > 1 else ''}" + (f" {sec} seconds" if sec else "")
+
+
+def load_items(cat, progress=None):
+    """Every top-level item, ready for the list. progress(fraction, step), if given, is told how
+    far it has got (a big catalogue takes a while: 38 seconds for 78,000 items)."""
+    def step(name, within=0.0):
+        if progress:
+            names = list(LOAD_STEPS)
+            nxt = names[min(names.index(name) + 1, len(names) - 1)]
+            a, b = LOAD_STEPS[name], LOAD_STEPS[nxt]
+            progress(a + (b - a) * within, LOAD_SAYS[name])
+    step("start")
     rows = cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number").fetchall()
     shared_sha = {r["sha1"] for r in cat.duplicate_images()}
     emulator.EXTRA_ROM_DIRS[:] = emulator.catalogued_rom_dirs(cat)   # ROMs found by scanning
     thumbs = pictures.thumbs_by_key(cat)
+    about = gameinfo.about_by_key(cat)
+    step("games")
     game_why = games.classify(cat)
+    step("lists")
     lists = datlists.lists_in({os.path.dirname(m["source"]) for m in rows})
     tunes = {k: len(v) for k, v in pictures.music_by_key(cat).items()}
     top = cat.top_ids()
     inside = {}      # top-level id -> every archive / image found inside it
     for r in cat.db.execute("SELECT * FROM media WHERE parent_id IS NOT NULL ORDER BY id"):
         inside.setdefault(top.get(r["id"]), []).append(r)
+    step("identify")
     known = identify.identify({m["id"]: [m] + inside.get(m["id"], []) for m in rows}, lists)
     not_games = ("Applications", "Compilations - Applications", "Coverdisks", "Demos", "Diskmags",
                  "Docs", "Drivers", "Educational", "Firmware", "Kickstart", "Operating Systems",
@@ -261,10 +297,14 @@ def load_items(cat):
     starred = favs.load(cat)
     mag_covers = magcovers.covers(cat)
     made = repair.repaired_sha1s()
+    step("repairs")
     plans = repair.plan_all(cat)
     rank = {"error": 3, "warning": 2}
     items = []
-    for m in rows:
+    step("items")
+    for n_done, m in enumerate(rows):
+        if n_done % 2000 == 1999:
+            step("items", n_done / len(rows))
         kind = m["kind"] or ""
         kids = inside.get(m["id"], [])
         # An archive holding a single disk image (the usual TOSEC .zip, or an .lha of one ADF)
@@ -352,6 +392,7 @@ def load_items(cat):
             identified_by=known[m["id"]][1] if m["id"] in known else "",
             name_guess="" if m["id"] in known else identify.guess(m["source"]),
             key=pictures.item_key(m), music=tunes.get(pictures.item_key(m), 0), cover=cover,
+            about=about.get(pictures.item_key(m), ""),
             fixable=tuple(readers.local_fixes(
                 [x for r in [m] + kids for f in ("problems", "warnings") for x in _j(r[f], [])])),
             damage=explain.summary([x for r in [m] + kids for x in _j(r["problems"], [])],
@@ -359,10 +400,12 @@ def load_items(cat):
             if status == "error" else "",
             repaired=bool(own_key) and own_key in made,
             rebuild=(len(plans[m["id"]].usable()), len(plans[m["id"]].lost)) if m["id"] in plans else ()))
+    step("versions")
     dupes.mark(items, cat)
     vers.mark(items, cat)
     _link_repairs(items)
     _link_empty_covers(items)
+    step("done")
     return items
 
 
@@ -1073,7 +1116,9 @@ def _wrap_label(text="", font=None, obj=None):
     lab.setWordWrap(True)
     lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     lab.setMinimumWidth(40)
-    lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    # selectable, and links in it can be clicked (selectable alone made them dead text)
+    lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse |
+                                Qt.TextInteractionFlag.LinksAccessibleByMouse)
     if font is not None:
         lab.setFont(font)
     if obj:
@@ -1576,7 +1621,7 @@ class RepairDialog(QDialog):
             if x.use is None:
                 where = "not on your other disks: it will be left out"
             else:
-                disks = len({s.number for s in x.sources})
+                disks = x.disks or len({s.number for s in x.sources})
                 where = f"from {x.use.label}"
                 if x.use.online:
                     tip = ("Not on your other disks, but Aminet has a file with exactly the same name and "
@@ -1940,6 +1985,24 @@ class DetailsPanel(QFrame):
 
         lf = ui_font(12, QFont.Weight.DemiBold)
         lf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
+        # What is known about the game or utility (gameinfo: Wikidata and Wikipedia)
+        self.on_info = None          # Tools > Find out about games online (set by the window)
+        self.about_box = QWidget()
+        ab = QVBoxLayout(self.about_box)
+        ab.setContentsMargins(0, 0, 0, 0)
+        ab.setSpacing(6)
+        self.about_label = QLabel("ABOUT THIS GAME")
+        self.about_label.setObjectName("section")
+        self.about_label.setFont(lf)
+        ab.addWidget(self.about_label)
+        self.about_text = _wrap_label("", ui_font(13))
+        self.about_text.setTextFormat(Qt.TextFormat.RichText)
+        self.about_text.linkActivated.connect(
+            lambda link: self.on_info() if link == "#info" and self.on_info else
+            QDesktopServices.openUrl(QUrl(link)))
+        ab.addWidget(self.about_text)
+        self.about_box.hide()
+
         self.music_label = QLabel("MUSIC")
         self.music_label.setObjectName("section")
         self.music_label.setFont(lf)
@@ -2027,13 +2090,15 @@ class DetailsPanel(QFrame):
         self.recheck_btn.setToolTip(RECHECK_TIP)
         self.recheck_btn.clicked.connect(lambda: self.on_recheck and self.on_recheck())
         buttons.addWidget(self.recheck_btn)
-        # Top to bottom: what it is, what you can do with it, its picture, what needs attention
-        # (and other notes), then the facts, its tunes and its contents.
-        v.insertLayout(1, buttons)
-        v.insertWidget(2, self.picture)
-        v.insertWidget(3, self.pic_caption)
+        # Top to bottom: its picture (first, so it is seen without scrolling), what it is, what you
+        # can do with it, what needs attention (and other notes), what the game is about, then the
+        # facts, its tunes and its contents.
+        v.insertWidget(0, self.picture)
+        v.insertWidget(1, self.pic_caption)
+        v.insertLayout(3, buttons)
         v.insertLayout(4, self.notes)
-        v.insertLayout(5, grid)
+        v.insertWidget(5, self.about_box)
+        v.insertLayout(6, grid)
         v.addStretch(1)
         scroll = QScrollArea()
         scroll.setObjectName("detailsScroll")
@@ -2316,6 +2381,48 @@ class DetailsPanel(QFrame):
         self._add_note(prio=1, note=Note("neutral", None, "<b>Can't be fixed from your collection</b> "
                                   "— hover for why", tip="\n".join(tip)))
 
+    ABOUT_LONGEST = 700          # characters of Wikipedia's summary shown (cut at a sentence)
+
+    def _show_about(self, item):
+        """ABOUT THIS GAME: what Wikidata and Wikipedia say about it, when it was found there.
+        Before the user has agreed to look things up, a game gets a link offering to."""
+        kind = "utility" if item.utility and not item.game else "game"
+        self.about_label.setText(f"ABOUT THIS {kind.upper()}")
+        qid = item.about or gameinfo.qid_for(self.cat, item.key)    # found since the list was read
+        f = gameinfo.facts(self.cat, qid) if qid else None
+        if f is None:
+            if item.game and not item.members and not self.cat.get_meta(gameinfo.CONSENT, False) \
+                    and self.on_info:
+                self.about_text.setText(
+                    f"<a href='#info'>Find out about this {kind} online…</a> Its genre, who made it, "
+                    "when it came out and what it is about, from Wikidata and Wikipedia.")
+                self.about_box.show()
+            else:
+                self.about_box.hide()
+            return
+        muted = C["ink-muted"].name()
+        html = []
+        summary = f["summary"]
+        if len(summary) > self.ABOUT_LONGEST:
+            cut = summary.rfind(". ", 0, self.ABOUT_LONGEST)
+            summary = summary[:cut + 1] if cut > 200 else summary[:self.ABOUT_LONGEST].rstrip() + "…"
+        if summary:
+            html.append(f"<p style='margin:0 0 6px 0'>{_esc(summary)}</p>")
+        elif f["what"]:
+            html.append(f"<p style='margin:0 0 6px 0'>{_esc(_cap(f['what']))}.</p>")
+        rows = [("Genre", ", ".join(f["genres"])), ("Made by", ", ".join(f["developers"])),
+                ("Published by", ", ".join(f["publishers"])),
+                ("First released", str(f["year"]) if f["year"] else ""),
+                ("Players", ", ".join(f["players"]))]
+        html.append("<br>".join(f"<span style='color:{muted}'>{_esc(k)}:</span> {_esc(val)}"
+                                for k, val in rows if val))
+        links = " · ".join(f"<a href='{_esc(url)}'>{_esc(name)}</a>" for name, url in f["links"])
+        source = "Wikidata and Wikipedia (CC BY-SA)" if f["summary"] else "Wikidata"
+        html.append(f"<p style='margin:6px 0 0 0'>{links}<br><span style='color:{muted}'>"
+                    f"From {source}, found by its name, {_esc(f['title'])}.</span></p>")
+        self.about_text.setText("".join(html))
+        self.about_box.show()
+
     def show_item(self, item):
         m = self.cat.media_by_id(item.id)
         if m is None:
@@ -2326,6 +2433,7 @@ class DetailsPanel(QFrame):
         self.source = m["source"]
         self.item_id = m["id"]
         self.item = item
+        self._show_about(item)
         self.fav_btn.setIcon(QIcon(icon("star" if item.favourite else "star-off", 16)))
         self.fav_btn.setText("Favourite" if item.favourite else "Add to favourites")
         floppy = any(r["kind"] in gotek.FLOPPY_KINDS and r["status"] != "empty" for r in [m] + kids)
@@ -3364,81 +3472,7 @@ class TurboViewWorker(QThread):
                 cat.db.close()
 
 
-class PictureWorker(QThread):
-    """Look for icons and pictures on items not yet looked at; optionally online too."""
-    progress = Signal(str, int, int, str)      # phase, done, total, what it is looking at
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, db_path, online=False):
-        super().__init__()
-        self.db_path, self.online = db_path, online
-        self.stop_wanted = False
-
-    def run(self):
-        try:
-            cat = Catalogue(self.db_path)
-            stop = lambda: self.stop_wanted
-            def name(m):
-                try:
-                    return os.path.basename(m["source"])
-                except Exception:
-                    return ""
-
-            res = {}
-            # The TOSEC list of Amiga disks, if the user agreed to it (once, then every two months).
-            tosec = cat.get_meta(identify.TOSEC_CONSENT, False)
-            if (tosec and (not identify.have_tosec() or identify.tosec_is_old())) or (
-                    not tosec and cat.get_meta(identify.CONSENT, False)
-                    and (not identify.have_list() or identify.list_is_old())):
-                try:
-                    self.progress.emit("identify", 0, 0, "tosec" if tosec else "")
-                    fetch = identify.download_tosec if tosec else identify.download
-                    fetch(stop, lambda d, t: self.progress.emit("identify", d // 1024, t // 1024,
-                                                                "tosec" if tosec else ""))
-                    res["identify_fetched"] = True
-                except pictures.Stopped:
-                    pass
-                except Exception as ex:
-                    res["identify_error"] = str(ex)
-            known_full = identify.for_catalogue(cat)
-            known = {k: v[0] for k, v in known_full.items()}
-            res["identified"] = len(known)
-            res["disk"] = pictures.build(
-                cat, lambda i, n, m, inner=None: self.progress.emit(
-                    "disk", i, n, name(m)) if inner is None else self.progress.emit(
-                    "disk-inside", inner[0], inner[1], f"{name(m)}\t{inner[2]}"), stop)
-            if not self.stop_wanted:
-                res["lengths"] = pictures.measure_music(
-                    cat, lambda i, n, m: self.progress.emit("lengths", i, n, ""), stop)
-            if self.online and not self.stop_wanted:
-                res["online"] = pictures.lookup_online(
-                    cat, lambda i, n, m: self.progress.emit("online", i, n, name(m)), stop, known=known)
-            if self.online and not self.stop_wanted:
-                # magazine covers for coverdisks, from the scans on the Internet Archive
-                issues = []
-                for m in cat.db.execute("SELECT id, source FROM media WHERE parent_id IS NULL"):
-                    cd = coverdisks.recognise(m["source"], known_full.get(m["id"]))
-                    if cd is not None and cd.magazine and cd.issue:
-                        issues.append((cd.magazine, magcovers.issue_key(cd.issue)))
-                if issues:
-                    res["covers"] = magcovers.lookup(
-                        cat, issues, lambda i, n, w: self.progress.emit("covers", i, n, w), stop)
-            if not self.stop_wanted:
-                # disks still without a picture: draw their Workbench window or Shell listing
-                res["drawn"] = madepics.make(
-                    cat, set(games.classify(cat)),
-                    lambda i, n, m: self.progress.emit("drawing", i, n, name(m)), stop)
-            if not self.stop_wanted and _has_disks(cat):   # keep the Amiga's copy up to date
-                try:
-                    folder = cat.get_meta("turboview_dir") or turboview.default_folder()
-                    turboview.install(folder)
-                    res["turboview"] = turboview.export(cat, load_items(cat), folder)
-                except Exception as ex:
-                    res["turboview_error"] = str(ex)
-            self.done.emit(res)
-        except Exception as ex:
-            self.failed.emit(str(ex))
+# The picture search and game details run in processes of their own: see jobs.py
 
 
 # ---------------------------------------------------------------- emulators
@@ -5098,6 +5132,7 @@ class ItemsLoader(QThread):
     """Reads the catalogue's items in the background at start-up, so the window opens at once."""
     loaded = Signal(object)
     failed = Signal(str)
+    progress = Signal(float, str)      # how far through (0 to 1), and the step it is on
 
     def __init__(self, db_path):
         super().__init__()
@@ -5106,7 +5141,7 @@ class ItemsLoader(QThread):
     def run(self):
         try:
             cat = Catalogue(self.db_path)
-            items = load_items(cat)
+            items = load_items(cat, self.progress.emit)
             cat.db.close()
             self.loaded.emit(items)
         except Exception as ex:
@@ -5402,6 +5437,7 @@ class MainWindow(QMainWindow):
         self.message.setFont(ui_font(15))
         self.message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.welcome = self._make_welcome()
+        self.opening = self._make_opening()
 
         self.tune_model = TuneModel()
         self.tune_proxy = QSortFilterProxyModel(self)
@@ -5437,6 +5473,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.table)
         self.stack.addWidget(self.message)
         self.stack.addWidget(self.welcome)
+        self.stack.addWidget(self.opening)
         self.stack.addWidget(self.tunes_table)
         panel = QFrame()
         panel.setObjectName("panel")
@@ -5456,6 +5493,7 @@ class MainWindow(QMainWindow):
         self.tv_timer.timeout.connect(self._update_turboview)
         self.tv_worker = None
         self.details.on_version = self.show_version
+        self.details.on_info = self.find_info
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("split")
         split.setHandleWidth(20)
@@ -5503,6 +5541,11 @@ class MainWindow(QMainWindow):
         self.foot_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         fl.addWidget(self.foot_left, 1)
         fl.addWidget(self.foot_stop, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.foot_info = QLabel()                 # game details, found alongside the pictures
+        self.foot_info.setObjectName("muted")
+        self.foot_info.setFont(ui_font(12))
+        self.foot_info.hide()
+        fl.addWidget(self.foot_info, 0, Qt.AlignmentFlag.AlignVCenter)
         # Always in sight: the suggestion box (Help › Suggest an idea…)
         self.idea_link = QLabel(f"<a href='idea' style='color:{C['accent'].name()}; text-decoration:none'>"
                                 "Got an idea?</a>")
@@ -5548,6 +5591,7 @@ class MainWindow(QMainWindow):
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._selection_changed())
 
         self.pic_worker = None
+        self.info_worker = None                 # finding out about games (jobs.InfoWorker)
         self.pic_refresh = QTimer(self, interval=8000)   # show pictures as they are found
         self.pic_refresh.timeout.connect(self._refresh_pictures)
         self._fill_counts()
@@ -5555,12 +5599,104 @@ class MainWindow(QMainWindow):
         self.search.edit.setFocus()
         self.loader = ItemsLoader(db_path)
         self.loader.loaded.connect(self._items_loaded)
+        self.loader.progress.connect(self._opening_progress)
+        self._opening_start()
         self.loader.failed.connect(lambda err: self._items_loaded(load_items(self.cat)))
         self.loader.start()
+
+    # ------------------------------------------------------------ opening a big catalogue
+    BIG_CATALOGUE = 5000          # items: from here, say it is a large collection
+
+    def _make_opening(self):
+        """What shows while the catalogue is read at start-up: how big it is, what TurboCAT is
+        doing, how far it has got and about how long is left (78,000 items take about 40 s)."""
+        page = QWidget()
+        page.setObjectName("openingPage")
+        outer = QVBoxLayout(page)
+        outer.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        col = QVBoxLayout()
+        col.setSpacing(10)
+        box = QWidget()
+        box.setMaximumWidth(560)
+        box.setLayout(col)
+        self.open_head = QLabel("Opening the catalogue…")
+        self.open_head.setFont(ui_font(18, QFont.Weight.Bold))
+        self.open_head.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.open_about = _wrap_label("", ui_font(14), "muted")
+        self.open_about.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.open_bar = QProgressBar()
+        self.open_bar.setObjectName("openMeter")
+        self.open_bar.setTextVisible(False)
+        self.open_bar.setRange(0, 1000)
+        self.open_step = _wrap_label("", ui_font(13), "muted")
+        self.open_step.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for w in (self.open_head, self.open_about, self.open_bar, self.open_step):
+            col.addWidget(w)
+        row.addWidget(box, 4)
+        row.addStretch(1)
+        outer.addLayout(row)
+        outer.addStretch(1)
+        self.open_timer = QTimer(self, interval=1000)    # the time left counts down between steps
+        self.open_timer.timeout.connect(self._opening_show)
+        return page
+
+    def _opening_start(self):
+        try:
+            self.open_count = self.cat.db.execute(
+                "SELECT COUNT(*) FROM media WHERE parent_id IS NULL").fetchone()[0]
+            last = self.cat.get_meta("open_seconds")
+        except Exception:
+            self.open_count, last = 0, None
+        self.open_last = last if isinstance(last, (int, float)) and last > 0 else None
+        self.open_started = time.monotonic()
+        self.open_total = self.open_last       # the estimate of how long it all takes
+        self.open_fraction, self.open_what = 0.0, LOAD_SAYS["start"]
+        if self.open_count:
+            self.counts.setText(f"Opening {self.open_count:,} items…")
+        if self.open_count >= self.BIG_CATALOGUE:
+            self.open_head.setText(f"Opening your catalogue of {self.open_count:,} items")
+            took = f" (about {_seconds(self.open_last)} last time)" if self.open_last and \
+                self.open_last >= 5 else ""
+            self.open_about.setText("A large collection takes a while to open" + took +
+                                    ". Everything is read from the catalogue on this computer; "
+                                    "your disks aren't touched.")
+        else:
+            self.open_head.setText("Opening the catalogue…")
+            self.open_about.setText("")
+        self.open_about.setVisible(bool(self.open_about.text()))
+        self._opening_show()
+        self.open_timer.start()
+
+    def _opening_progress(self, fraction, what):
+        self.open_fraction, self.open_what = fraction, what
+        elapsed = time.monotonic() - self.open_started
+        if fraction >= 0.1:
+            self.open_total = elapsed / fraction
+        self._opening_show()
+
+    def _opening_show(self):
+        self.open_bar.setValue(int(1000 * self.open_fraction))
+        text = self.open_what + "…"
+        if self.open_total:
+            left = self.open_total - (time.monotonic() - self.open_started)
+            text += f"  ·  {'nearly done' if left < 3 else 'about ' + _seconds(left) + ' left'}"
+        self.open_step.setText(text)
+
+    def _opening_end(self):
+        self.open_timer.stop()
+        took = time.monotonic() - getattr(self, "open_started", time.monotonic())
+        if took >= 1:
+            try:
+                self.cat.set_meta("open_seconds", round(took, 1))    # the next estimate
+            except Exception:
+                pass
 
     def _items_loaded(self, items):
         """The catalogue's items are read: show them, then look for pictures as before."""
         self.loading = False
+        self._opening_end()
         self.all_items = items
         self._make_sets()
         self._fill_counts()
@@ -5634,6 +5770,10 @@ class MainWindow(QMainWindow):
         m = bar.addMenu("&Tools")
         self.act_online = add(m, "Find pictures &online", self.find_online, None,
                               "Look up title screens in the libretro-thumbnails collection, and magazine covers for coverdisks on the Internet Archive")
+        self.act_info = add(m, "Find out about &games online…", self.find_info, None,
+                            "Look up each game and utility on Wikidata and Wikipedia: its genre, who made "
+                            "it, when it came out, how many can play, a short description, and links to "
+                            "Hall of Light, Lemon Amiga and MobyGames")
         self.act_identify = add(m, "&Identify disks online…", self.identify_online, None,
                                 "Find each disk's proper name from its checksum, in the TOSEC list of Amiga disks")
         add(m, "&Rename files to their proper names…", self.rename_to_tosec, None,
@@ -6886,6 +7026,8 @@ class MainWindow(QMainWindow):
         self._show_result(f"Scan failed: {err}")
 
     def _show_result(self, msg):
+        if self.closing:
+            return          # stopped by closing: no need to re-read the list for a window that is going
         self.sub_row.hide()
         self.scan_text.setText(msg)
         self.scan_file.setText("")
@@ -6954,6 +7096,7 @@ class MainWindow(QMainWindow):
         self.pic_shown = False
         if asked:
             self._pic_bar("Getting ready…", 0, 0, "")
+        self.pic_seen_at = time.time()          # _refresh_pictures: what is found from now on
         self.pic_worker = PictureWorker(self.db_path, online)
         self.pic_worker.progress.connect(self._pic_progress)
         self.pic_worker.done.connect(self._pic_done)
@@ -6963,6 +7106,8 @@ class MainWindow(QMainWindow):
         self.act_online.setEnabled(False)
         self.pic_worker.start()
         self.pic_refresh.start()
+        if self.cat.get_meta(gameinfo.CONSENT, False):
+            self.find_details()               # side by side with the pictures
 
     def identify_online(self):
         """Tools > Identify disks online: download the TOSEC list once (asking first)."""
@@ -7048,6 +7193,86 @@ class MainWindow(QMainWindow):
             return
         self.find_pictures(online=True, asked=True)
 
+    def find_info(self):
+        """Tools > Find out about games online: ask once, then look up in the background (and after
+        every scan from then on)."""
+        if not self.cat.get_meta(gameinfo.CONSENT, False):
+            box = QMessageBox(self)
+            box.setWindowTitle("Find out about games online")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText("Look up your games and utilities on Wikidata and Wikipedia?")
+            box.setInformativeText(
+                "TurboCAT downloads Wikidata's list of about 2,000 Amiga games and programs (once, "
+                "then every two months) and matches your disks to it by name. For each title found "
+                "it fetches the first lines of its Wikipedia article, slowly, one at a time.\n\n"
+                "The details then show its genre, who made it, when it came out, how many can play, "
+                "what it is about, and links to Hall of Light, Lemon Amiga and MobyGames.\n\n"
+                "Wikidata gets nothing about your disks. Wikipedia is asked for the article of each "
+                "title found, by its title. It runs quietly in the background, and waits while you're using TurboCAT; the "
+                "status bar shows how far it has got.")
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            box.button(QMessageBox.StandardButton.Yes).setText("Look them up")
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                return
+            self.cat.set_meta(gameinfo.CONSENT, True)
+            if self.details.item is not None:
+                self.details._show_about(self.details.item)     # the offer goes
+        self.result_label.setText("Finding out about your games in the background: the status bar "
+                                  "shows how far it has got")
+        self.find_details()
+
+    def find_details(self):
+        """Find out about the games and utilities, in a process of its own (alongside the picture
+        search, if that is running)."""
+        if self.info_worker is not None or self.closing:
+            return
+        self.info_worker = InfoWorker(self.db_path)
+        self.info_worker.progress.connect(self._info_progress)
+        self.info_worker.done.connect(self._info_done)
+        self.info_worker.failed.connect(self._info_failed)
+        self.info_worker.finished.connect(self._info_finished)
+        self.info_worker.start()
+
+    def _info_progress(self, phase, i, n, what):
+        if phase == "list":
+            text = "Game details: getting Wikidata's list of Amiga games…"
+        elif phase == "match":
+            text = f"Game details: matching your disks… {i:,} of {n:,}" if n else ""
+        else:
+            text = f"Game details from Wikipedia: {i + 1:,} of {n:,}" + (f" ({what})" if what else "")
+            if self.details.item is not None:
+                self.details._show_about(self.details.item)     # its description may just have come
+        if text:
+            self.foot_info.setText(text)
+            self.foot_info.setToolTip("TurboCAT is finding out about your games and utilities on "
+                                      "Wikidata and Wikipedia, slowly and in the background. It waits "
+                                      "while you're using TurboCAT.")
+            self.foot_info.show()
+
+    def _info_done(self, res):
+        if res.get("error"):
+            self.foot_info.setText(f"Game details: Wikidata couldn't be reached ({res['error']}); "
+                                   "trying again after the next scan")
+        elif res.get("stopped"):
+            self.foot_info.hide()
+            return
+        else:
+            n = res.get("texts", 0)
+            self.foot_info.setText(f"Game details: found out about {_n(n, 'more game')}" if n else
+                                   "Game details: up to date")
+        if self.details.item is not None:
+            self.details._show_about(self.details.item)
+        QTimer.singleShot(20000, self.foot_info.hide)
+
+    def _info_failed(self, err):
+        self.foot_info.setText(f"Game details: couldn't finish ({err})")
+        QTimer.singleShot(20000, self.foot_info.hide)
+
+    def _info_finished(self):
+        self.info_worker = None
+        if self.closing:
+            self._close_when_idle()
+
     def stop_pictures(self):
         if self.pic_worker is not None:
             self.pic_worker.stop_wanted = True
@@ -7128,6 +7353,9 @@ class MainWindow(QMainWindow):
                 self._pic_bar("Getting the TOSEC list of Amiga disks from GitHub…", i, n,
                               size or "libretro-database, about 12 MB, once")
             return
+        if phase == "reading":
+            self._pic_bar("Bringing the list up to date…", 0, 0, "")
+            return
         if phase == "online" and not n:
             self._pic_bar("Getting the list of pictures from GitHub…", 0, 0,
                           "libretro-thumbnails, Commodore Amiga")
@@ -7145,6 +7373,8 @@ class MainWindow(QMainWindow):
 
     def _pic_done(self, res):
         self._pic_foot_end()
+        if self.closing:
+            return          # stopped by closing: re-reading the list (a minute on a big one) is no use
         bits = []
         if res["disk"]["looked"]:
             bits.append(f"{res['disk']['found']:,} of {res['disk']['looked']:,} new items had pictures "
@@ -7173,7 +7403,7 @@ class MainWindow(QMainWindow):
         if self.pic_shown and "online" in res and not res["online"]["looked"] \
                 and not res["online"].get("stopped"):
             bits.append("every disk without a picture has been looked up online already")
-        self.reload()
+        self.reload(res.get("items"))
         if bits:
             self._pic_note(" · ".join(bits))
             QTimer.singleShot(15000, self._fill_counts)
@@ -7208,27 +7438,36 @@ class MainWindow(QMainWindow):
 
     def _refresh_pictures(self):
         """While the picture search runs: show the pictures and icons it has found so far, in
-        place (one quick read of the pictures table), instead of rebuilding the whole list."""
+        place, instead of rebuilding the whole list. Only what was found since the last look is
+        read (reading all of it, every 8 seconds, held the window up for 0.4 s on 78,000 items)."""
+        since = getattr(self, "pic_seen_at", 0.0)
         try:
-            thumbs = pictures.thumbs_by_key(self.cat)
+            rows = self.cat.db.execute("SELECT * FROM thumbs WHERE made_at >= ?", (since - 5,)).fetchall()
         except Exception:
             return
+        self.pic_seen_at = time.time()
+        if not rows:
+            return
+        if getattr(self, "_by_key_for", None) is not self.all_items:     # the list was read again
+            self._by_key = {}
+            for it in self.all_items:
+                if not it.members:
+                    self._by_key.setdefault(it.key, []).append(it)
+            self._by_key_for = self.all_items
         changed = []
-        for it in self.all_items:
-            th = thumbs.get(it.key)
-            if th is None or it.members:
-                continue
-            icon = pictures.picture_path(th["icon"]) or ""
-            if it.pic_origin == "cover":                 # a magazine cover stays
-                pic, frm, origin = it.pic, it.pic_from, it.pic_origin
-            else:
-                pic, frm, origin = (pictures.picture_path(th["pic"]) or "", th["pic_from"] or "",
-                                    th["origin"] or "")
-                if not pic and th["made"]:
-                    pic, frm, origin = pictures.picture_path(th["made"]), th["made_from"] or "", "made"
-            if (icon, pic) != (it.thumb_icon, it.pic):
-                it.thumb_icon, it.pic, it.pic_from, it.pic_origin = icon, pic, frm, origin
-                changed.append(it)
+        for th in rows:
+            for it in self._by_key.get(th["key"], ()):
+                icon = pictures.picture_path(th["icon"]) or ""
+                if it.pic_origin == "cover":                 # a magazine cover stays
+                    pic, frm, origin = it.pic, it.pic_from, it.pic_origin
+                else:
+                    pic, frm, origin = (pictures.picture_path(th["pic"]) or "", th["pic_from"] or "",
+                                        th["origin"] or "")
+                    if not pic and th["made"]:
+                        pic, frm, origin = pictures.picture_path(th["made"]), th["made_from"] or "", "made"
+                if (icon, pic) != (it.thumb_icon, it.pic):
+                    it.thumb_icon, it.pic, it.pic_from, it.pic_origin = icon, pic, frm, origin
+                    changed.append(it)
         if not changed:
             return
         n = self.model.rowCount()
@@ -7241,15 +7480,15 @@ class MainWindow(QMainWindow):
     def reload(self, items=None):
         """Re-read the catalogue after a scan, keeping the search and selection. items: already
         read (in the background, see _live_reload)."""
-        before = {it.id: (it.pic, it.thumb_icon) for it in self.all_items}
+        before = {it.id: (it.pic, it.thumb_icon, it.about) for it in self.all_items}
         self.all_items = items if items is not None else load_items(self.cat)
         self._make_sets()
         if self.pic_worker is None:
             self._fill_counts()
         self.run_search()
         cur = next((it for it in self.model.items if it.id == self.current_id), None)
-        if cur is not None and before.get(cur.id) != (cur.pic, cur.thumb_icon):
-            self.details.show_item(cur)        # a picture was just found for it
+        if cur is not None and before.get(cur.id) != (cur.pic, cur.thumb_icon, cur.about):
+            self.details.show_item(cur)        # a picture, or what it is, was just found for it
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -7314,6 +7553,7 @@ class MainWindow(QMainWindow):
     def _busy(self):
         """What is still running in the background, in words (empty if nothing)."""
         return " and ".join(w for w, t in (("the scan", self.worker), ("the picture search", self.pic_worker),
+                                           ("finding out about games", getattr(self, "info_worker", None)),
                                            ("updating TurboView", getattr(self, "tv_worker", None)),
                                            ("the repairs", getattr(self, "repairer", None)),
                                            ("the Aminet look-up", getattr(self, "aminet_worker", None)))
@@ -7336,7 +7576,8 @@ class MainWindow(QMainWindow):
             super().closeEvent(event)
             return
         event.ignore()
-        for t in (self.worker, self.pic_worker, self.tv_worker, getattr(self, "repairer", None),
+        for t in (self.worker, self.pic_worker, getattr(self, "info_worker", None), self.tv_worker,
+                  getattr(self, "repairer", None),
                   getattr(self, "aminet_worker", None)):
             if t is not None:
                 t.stop_wanted = True
@@ -7391,8 +7632,8 @@ class MainWindow(QMainWindow):
     def _show_total(self):
         """The heading's count: the same number as All items, with what isn't counted on hover."""
         total = getattr(self, "total_items", None)
-        if total is None:
-            return
+        if total is None or getattr(self, "loading", False):
+            return                      # while opening, it says how many it is opening
         self.counts.setText(f"{total:,} items · {getattr(self, 'files_total', 0):,} files on them")
         hidden = getattr(self, "total_hidden", [])
         self.counts.setToolTip("Not counted: " + ", ".join(hidden) + ". Nothing is deleted."
@@ -7553,8 +7794,7 @@ class MainWindow(QMainWindow):
         self.export_tunes_btn.setVisible(music_view and self.tune_view)
         self.fav_tunes_btn.setVisible(music_view and self.tune_view)
         if not self.all_items and self.loading:
-            self.message.setText("Opening the catalogue…")
-            self.stack.setCurrentWidget(self.message)
+            self.stack.setCurrentWidget(self.opening)
         elif not self.all_items and self.worker is not None:
             self.message.setText("Reading your disks…\n\nThey appear here as they are read.")
             self.stack.setCurrentWidget(self.message)
@@ -7762,6 +8002,8 @@ class MainWindow(QMainWindow):
             QProgressBar::chunk {{ background: {c['accent']}; border-radius: 3px; }}
             QProgressBar#scanMeter {{ min-height: 10px; max-height: 10px; border-radius: 5px; }}
             QProgressBar#scanMeter::chunk {{ border-radius: 5px; }}
+            QProgressBar#openMeter {{ background: {c['line']}; min-height: 10px; max-height: 10px; border-radius: 5px; }}
+            QProgressBar#openMeter::chunk {{ border-radius: 5px; }}
             QScrollBar:vertical {{ background: {c['surface']}; width: 12px; margin: 0; }}
             QScrollBar:horizontal {{ background: {c['surface']}; height: 12px; margin: 0; }}
             QScrollBar::handle:horizontal {{ background: {c['line']}; border-radius: 4px; min-width: 30px;
@@ -7773,16 +8015,75 @@ class MainWindow(QMainWindow):
                 """ + TIP_STYLE)
 
 
+STARTING_NOTE_AFTER = 0.4     # seconds: a quick check shows no note
+
+
+def _while_starting(work, db_path):
+    """Run work() (the catalogue's check and safety copy) away from the window, and say what is
+    happening if it takes a while: on a big catalogue (850 MB, 78,000 items) the check reads the
+    whole file, which took 45 seconds after a restart with nothing on screen."""
+    out = {}
+
+    def run_it():
+        try:
+            out["result"] = work()
+        except BaseException as ex:      # passed back, as if work() had run here
+            out["error"] = ex
+
+    t = threading.Thread(target=run_it, name="catalogue check", daemon=True)
+    t.start()
+    t.join(STARTING_NOTE_AFTER)
+    note = None
+    if t.is_alive():
+        try:
+            size = os.path.getsize(db_path)
+        except OSError:
+            size = 0
+        note = QWidget(None, Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint)
+        note.setObjectName("startingNote")
+        note.setWindowTitle(APP_NAME)
+        v = QVBoxLayout(note)
+        v.setContentsMargins(28, 22, 28, 22)
+        head = QLabel(f"Starting {APP_NAME}…")
+        head.setFont(ui_font(16, QFont.Weight.Bold))
+        v.addWidget(head)
+        v.addWidget(QLabel(f"Checking the catalogue for damage ({size / (1 << 20):,.0f} MB). "
+                           "A big one takes a minute."))
+        bar = QProgressBar()
+        bar.setRange(0, 0)                # moving: working, length unknown
+        v.addWidget(bar)
+        note.show()
+        while t.is_alive():
+            QApplication.processEvents()
+            t.join(0.05)
+        note.close()
+        note.deleteLater()
+        QApplication.processEvents()
+    if "error" in out:
+        raise out["error"]
+    return out["result"]
+
+
 def _catalogue_ready(db_path):
     """Check the catalogue before opening it. A healthy one gets a safety copy; a damaged one is
     offered its newest copy back. False if the window can't open."""
     from . import catalogue as C
-    ok, why = C.check(db_path)
+
+    def check_and_copy():
+        ok, why = C.check(db_path)
+        if ok:
+            try:
+                C.make_backup(db_path)
+            except Exception as ex:      # a copy that fails must never stop TurboCAT starting
+                print(f"Couldn't make a safety copy of the catalogue: {ex}", file=sys.stderr)
+            try:                         # brings its tables and indexes up to date while the note
+                C.Catalogue(db_path).db.close()     # shows (a new index takes a few seconds once)
+            except Exception:
+                pass                     # the window says what is wrong when it opens it
+        return ok, why
+
+    ok, why = _while_starting(check_and_copy, db_path)
     if ok:
-        try:
-            C.make_backup(db_path)
-        except Exception as ex:          # a copy that fails must never stop TurboCAT starting
-            print(f"Couldn't make a safety copy of the catalogue: {ex}", file=sys.stderr)
         return True
     copies = C.backups(db_path)
     box = QMessageBox()
@@ -7837,7 +8138,12 @@ class TipFormatter(QObject):
     """Shows every hover note in TurboCAT the same way: long plain notes wrapped to TIP_WIDTH.
     Works for widgets and for rows in lists and trees."""
 
+    BUSY = (QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.Wheel)
+
     def eventFilter(self, obj, event):
+        if event.type() in self.BUSY:        # background work waits while the user is busy
+            background.user_did_something()
+            return False
         if event.type() != QEvent.Type.ToolTip or not isinstance(obj, QWidget):
             return False
         text = obj.toolTip()

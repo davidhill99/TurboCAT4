@@ -23,9 +23,11 @@ class PrivacyTest(unittest.TestCase):
         are only opened in the browser for the user to read)."""
         named = privacy.markdown().lower()
         where = {"aminet.net": "aminet", "tosecdev.org": "tosecdev", "archive.org": "internet archive",
-                 "githubusercontent.com": "github", "api.github.com": "github", "ko-fi.com": "ko-fi.com"}
+                 "githubusercontent.com": "github", "api.github.com": "github", "ko-fi.com": "ko-fi.com",
+                 "wikidata.org": "wikidata", "wikipedia.org": "wikipedia"}
         only_opened = {"github.com", "zakalwe.fi", "lib.openmpt.org", "xmp.sourceforge.net", "fs-uae.net",
-                       "amiberry.com", "www.amigaforever.com"}
+                       "amiberry.com", "www.amigaforever.com", "amiga.abime.net",
+                       "www.lemonamiga.com", "www.mobygames.com"}
         pkg = os.path.join(ROOT, "turbocat")
         for name in os.listdir(pkg):
             if not name.endswith(".py"):

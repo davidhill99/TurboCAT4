@@ -5,6 +5,7 @@ flag code which installs itself in memory - the behaviour of classic bootblock
 viruses (and, to be fair, of some virus killers and copy protections).
 """
 
+import functools
 import re
 import struct
 
@@ -73,14 +74,20 @@ def _english_score(words) -> float:
 _VOWELS = set("aeiouyAEIOUY")
 
 
+_CONSONANTS = re.compile(r"[^aeiouyAEIOUY]{5,}")
+
+
+@functools.lru_cache(maxsize=300_000)
 def _good_word(w: str) -> bool:
+    """Remembered: the same words come up millions of times when the list is read (choosing
+    titles for 78,000 items asked 7 million times)."""
     if len(w) < 2 or not (set(w) & _VOWELS):
         return False
     # real words are lower case, UPPER CASE or Capitalised - not rAnDoM
     if not (w.islower() or w.isupper() or (w[0].isupper() and w[1:].islower())):
         return False
     # random data tends to produce long runs of consonants
-    return not re.search(r"[^aeiouyAEIOUY]{5,}", w)
+    return not _CONSONANTS.search(w)
 
 
 _GLUED = re.compile(r"[A-Za-z][`~|^\\{}\[\]<>@=][A-Za-z]")

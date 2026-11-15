@@ -45,9 +45,15 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS ix_media_source ON media(source);
 CREATE INDEX IF NOT EXISTS ix_media_sha1   ON media(sha1);
+-- what is inside an archive: names to look up online (pictures, gameinfo) took a whole read
+-- of the 162,000 rows for each item without it
+CREATE INDEX IF NOT EXISTS ix_media_parent ON media(parent_id);
 CREATE INDEX IF NOT EXISTS ix_files_media  ON files(media_id);
 CREATE INDEX IF NOT EXISTS ix_files_sha1   ON files(sha1);
-CREATE INDEX IF NOT EXISTS ix_files_name   ON files(name COLLATE NOCASE);
+-- by name and size: finding other copies of a damaged disk's lost files (repair.py) went from
+-- 25 to 8 seconds on 3.5 million files; it also serves look-ups by name alone
+CREATE INDEX IF NOT EXISTS ix_files_name_size ON files(name COLLATE NOCASE, size);
+DROP INDEX IF EXISTS ix_files_name;
 """
 
 # ---------------------------------------------------------------- searching

@@ -11,7 +11,11 @@ import unittest
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(here), here]
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-result = unittest.main(module=None, argv=[sys.argv[0], "discover", "-s", here, "-v"], exit=False).result
-sys.stdout.flush()
-sys.stderr.flush()
-os._exit(0 if result.wasSuccessful() else 1)
+
+# Guarded: background work runs in processes that import this file again (test_jobs.py); they must
+# not run the tests themselves.
+if __name__ == "__main__":
+    result = unittest.main(module=None, argv=[sys.argv[0], "discover", "-s", here, "-v"], exit=False).result
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0 if result.wasSuccessful() else 1)

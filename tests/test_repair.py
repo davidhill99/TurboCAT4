@@ -140,6 +140,25 @@ class RepairTest(unittest.TestCase):
         names = sorted(p.source_file for p in repair._plan_all(self.cat).values())
         self.assertEqual(names, ["Late (1991)(PD)[b].adf", "Utils (1990)(PD)[b].adf"])
 
+    def test_a_common_file_keeps_only_a_few_copies(self):
+        """A big collection had 4,000 damaged disks whose lost files (devs/system-configuration)
+        were on 35,000 other disks: listing every copy took over a gigabyte, and TurboCAT ran out
+        of memory. Every copy is counted, but only a few are kept to read from."""
+        for i in range(12):
+            with open(os.path.join(self.disks, f"Copy {i:02d}.adf"), "wb") as f:
+                f.write(make_adf(f"C{i}", {"c/Type": TOOL}))
+        with open(os.path.join(self.disks, "Odd.adf"), "wb") as f:     # another version
+            f.write(make_adf("Odd", {"c/Type": bytes(reversed(TOOL))}))
+        scanner.scan([self.disks], self.cat, progress=None)
+        with unittest.mock.patch.object(repair, "KEEP_COPIES", 4):
+            plans = repair._plan_all(self.cat)
+        x = next(iter(plans.values())).lost[0]
+        self.assertEqual(x.versions, 2)
+        self.assertEqual(x.disks, 14)                   # Workbench, 12 copies and Odd
+        self.assertEqual(len(x.sources), 4)             # only the version picked, a few copies
+        self.assertTrue(all(s.sha1 == x.use.sha1 for s in x.sources))
+        self.assertEqual(x.use.sha1, hashlib.sha1(TOOL).hexdigest())     # the one found most often
+
     def test_an_unreadable_source_falls_back_to_another_copy(self):
         with open(os.path.join(self.disks, "Extras.adf"), "wb") as f:
             f.write(make_adf("Extras", {"c/Type": TOOL}))

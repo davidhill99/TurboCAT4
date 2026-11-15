@@ -7,6 +7,29 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## Unreleased (for the next beta)
 
+- **Fixed: links in the details couldn't be clicked** (such as where a picture came from): the
+  text could be selected, but the links didn't open
+- **New: find out about your games** (Tools › Find out about games online…, or the link under a
+  game's details). TurboCAT matches your disks by name to Wikidata's list of about 2,000 Amiga games
+  and programs, and the details then show *About this game*: a few lines from Wikipedia, its genre,
+  who made and published it, when it first came out, how many can play, and links to Hall of Light,
+  Lemon Amiga, MobyGames and Wikipedia. On a 78,000-item collection 17,000 disks (1,471 different
+  titles) were recognised. Asks first; the list is fetched once and then every two months, and the
+  Wikipedia lines one title at a time, a second apart. After that, new disks are looked up after
+  each scan
+- **Background work no longer slows TurboCAT down.** The picture search and the game look-up
+  each run in a process of their own, side by side, at the lowest priority for the processor and
+  the disk. (In a thread of the window's own process they still slowed it down: Python runs one
+  thread at a time, so the window waited its turn.) They wait while you are clicking, typing or
+  scrolling, and go on a moment after you stop. Measured on a 78,000-item collection, the window
+  now answers within 22 ms 99% of the time while the search runs; showing newly found pictures
+  every 8 seconds now reads only the new ones (reading them all held the window up for 0.4 s).
+  Game details have their own place in the status bar, beside the picture search, and show in the
+  details as soon as each is found. The status bar still shows what it is doing and how far it has
+  got. When it finished, it used to read the whole list again in the window itself, which froze the
+  window for about 40 seconds on a big collection: the list is now read in the background, too. A
+  new index makes finding what is inside each archive quick (looking up pictures online read every
+  disk in the catalogue once per item)
 - **Fixed: TurboCAT stopped with an error during a long scan**
   ([issue #1](https://github.com/davidhill99/TurboCAT4/issues/1)). While a scan runs, the list
   reloads every few seconds; if the scan added a damaged disk in the moment between two steps of
@@ -18,6 +41,31 @@ What changed in each release, newest first. Work not yet in a numbered release i
   so the window never got a moment to respond. It is now read in the background, the window only
   shows the result (a quarter of a second instead of five), and the next reload waits twice as long
   as the last one took
+- **Fixed: TurboCAT ran out of memory on a very big collection** (and was closed by the system,
+  while looking for pictures after a 78,000-item scan). Working out which damaged disks can be
+  repaired listed every copy of each lost file found elsewhere; common files such as
+  devs/system-configuration are on 35,000 TOSEC disks, so 4,000 damaged disks made 2.5 million
+  entries and over a gigabyte, rebuilt on every reload. Every copy is still counted, but only a
+  few copies of the version that would be used are kept, and each file is looked up once however
+  many disks lost it: about 1.3 GB less memory, and less than half the time
+- **TurboCAT says it is starting on a big catalogue.** Before the window opens, TurboCAT checks the
+  catalogue file for damage, which reads all of it: with an 850 MB catalogue that took 45 seconds
+  with nothing on screen, so it looked as if it wouldn't start. A small window now says it is
+  checking the catalogue (and how big it is) whenever the check takes more than a moment
+- **Fixed: closing took over a minute on a big catalogue** when the picture search or a scan was
+  running. They stopped quickly, but then the whole list was read again (in the window itself)
+  before it closed. Closing now skips that
+- **Opening a big catalogue is almost three times quicker**: reading 78,000 items took 106
+  seconds, now 38. Choosing a title from the text on disks without a name checked the same words
+  millions of times (now remembered); working out which damaged disks can be repaired now sums up
+  each lost file's copies once, and a new index finds files by name and size together (built once,
+  in a few seconds, while TurboCAT says it is checking the catalogue)
+- **Opening a big catalogue shows how it is getting on**: instead of just "Opening the
+  catalogue…", TurboCAT says how many items it is opening and that a large collection takes a
+  while (and how long it took last time), and shows a progress bar, the step it is on and about
+  how many seconds are left
+- **The picture comes first in the details panel**, above the name and buttons, so it is seen
+  without scrolling
 - **The Big archives window says where each archive is**: under each name, the folder it is in
   (~/Dropbox/AMIGA), so one in a folder you meant to leave out is easy to spot and untick
 

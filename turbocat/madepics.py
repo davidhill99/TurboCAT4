@@ -44,7 +44,7 @@ def _store(cat, key, png, made_from):
     cat.db.execute(
         "INSERT INTO thumbs (key, made, made_from, made_v, made_at) VALUES (?,?,?,?,?) "
         "ON CONFLICT(key) DO UPDATE SET made=excluded.made, made_from=excluded.made_from, "
-        "made_v=excluded.made_v", (key, name, made_from, MADE_RULES, time.time()))
+        "made_v=excluded.made_v, made_at=excluded.made_at", (key, name, made_from, MADE_RULES, time.time()))
 
 
 def make(cat, skip=(), progress=None, stop=lambda: False):

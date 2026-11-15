@@ -70,6 +70,7 @@ class Lost:
     versions: int = 0                 # different checksums among the sources
     use: Optional[Source] = None      # the replacement picked
     confidence: str = "none"          # strong, likely, unsure, none
+    disks: int = 0                    # items with a copy (sources keeps only a few of them)
 
     @property
     def name(self):
@@ -127,6 +128,7 @@ class Index:
             while self.parent.get(t):
                 t = self.parent[t]
             self.top[mid] = t
+        self.copies = {}                   # (name, size) -> files it could be taken from, see _copies
 
     def descendants(self, mid):
         out, todo = [], [mid]
@@ -176,6 +178,86 @@ def _j(s):
         return []
 
 
+class _File:
+    """Every copy of one file (a name and size) in the catalogue, summed up per version, so each
+    damaged disk that lost it only has to take away its own copies: a common file such as
+    devs/system-configuration is on 35,000 disks, and lost by hundreds of damaged ones."""
+
+    def __init__(self, rows, top_of):
+        self.by_media = {}           # media id -> [(sha1, date)]
+        self.versions = {}           # sha1 -> _FileVersion
+        self.tops = set()            # top-level items with a copy
+        for media_id, path, sha1, date, kind in rows:
+            t = top_of(media_id)
+            if t is None:
+                continue             # added by a scan still running: next time
+            self.by_media.setdefault(media_id, []).append((sha1, date))
+            self.tops.add(t["id"])
+            v = self.versions.get(sha1)
+            if v is None:
+                v = self.versions[sha1] = _FileVersion()
+            v.count += 1
+            v.tops.add(t["id"])
+            v.dates[date] = v.dates.get(date, 0) + 1
+            # a few copies to read from, plain disks first (quicker than a disk in an archive);
+            # spare ones, in case some are the damaged disk's own
+            pile = v.floppies if kind in FLOPPY else v.others
+            if len(pile) < KEEP_COPIES + 8:
+                pile.append(Source(media_id, t["number"] or 0,
+                                   os.path.basename(t["source"].rstrip("/")), path, sha1, date))
+
+    def groups_for(self, item, top_id, own):
+        """{sha1: _Version} for one damaged disk's lost file, leaving out the disk's own copies."""
+        own_count, own_dated = {}, {}
+        for m in own:
+            for sha1, date in self.by_media.get(m, ()):
+                own_count[sha1] = own_count.get(sha1, 0) + 1
+                if item.date and date == item.date:
+                    own_dated[sha1] = own_dated.get(sha1, 0) + 1
+        groups = {}
+        for sha1, v in self.versions.items():
+            count = v.count - own_count.get(sha1, 0)
+            if count <= 0:
+                continue
+            g = groups[sha1] = _Version()
+            g.count = count
+            g.n_tops = len(v.tops) - (top_id in v.tops)
+            g.same_date = g.near_date = bool(item.date) and \
+                v.dates.get(item.date, 0) - own_dated.get(sha1, 0) > 0
+            g.kept = [c for c in v.floppies + v.others if c.media_id not in own][:KEEP_COPIES]
+        item.disks = len(self.tops) - (top_id in self.tops)
+        return groups
+
+
+class _FileVersion:
+    __slots__ = ("count", "tops", "dates", "floppies", "others")
+
+    def __init__(self):
+        self.count, self.tops, self.dates, self.floppies, self.others = 0, set(), {}, [], []
+
+
+def _copies(cat, name, size, ix=None):
+    """Every copy elsewhere of a file with this name (any case) and size that it could be taken
+    from, summed up (_File). With an Index, each name and size is read once: many damaged disks
+    lost the same common files."""
+    key = ("".join(c.lower() if c < "\x80" else c for c in name), size)  # as COLLATE NOCASE
+    memo = ix.copies if ix is not None else {}
+    if key not in memo:
+        rows = [(f["media_id"], f["path"], f["sha1"], f["date"] or "", f["kind"])
+                for f in cat.db.execute(
+                    "SELECT f.media_id, f.path, f.sha1, f.date, m.kind FROM files f "
+                    "JOIN media m ON m.id=f.media_id "
+                    "WHERE f.name=? COLLATE NOCASE AND f.size=? AND f.sha1 IS NOT NULL "
+                    "AND NOT f.is_dir", (name, size))
+                if f["kind"] in FLOPPY + ("zip", "lha")]       # can't take a file out of others yet
+        if ix is not None:
+            top_of = lambda m: ix.info[ix.top[m]] if m in ix.top else None
+        else:
+            top_of = lambda m: _top(cat, m)
+        memo[key] = _File(rows, top_of)
+    return memo[key]
+
+
 def plan(cat, top_id, ix=None):
     """What a repaired copy of this item would get, or None if it has no damaged floppy.
     ix: an Index, when planning many disks."""
@@ -183,9 +265,8 @@ def plan(cat, top_id, ix=None):
     if disk is None:
         return None
     top = cat.media_by_id(top_id)
-    own = [top_id] + (ix.descendants(top_id) if ix is not None
-                      else [r["id"] for r in _descendants(cat, top_id)])
-    marks = ",".join("?" * len(own))
+    own = {top_id, *(ix.descendants(top_id) if ix is not None
+                     else [r["id"] for r in _descendants(cat, top_id)])}
     lost = []
     for path in explain.damaged_paths(_j(disk["problems"])):
         row = cat.db.execute("SELECT size, date FROM files WHERE media_id=? AND path=?",
@@ -193,25 +274,17 @@ def plan(cat, top_id, ix=None):
         if row is None:
             continue
         item = Lost(path, row["size"] or 0, row["date"] or "")
-        if item.size:
-            for f in cat.db.execute(
-                    f"SELECT f.media_id, f.path, f.sha1, f.date, m.kind FROM files f "
-                    f"JOIN media m ON m.id=f.media_id "
-                    f"WHERE f.name=? COLLATE NOCASE AND f.size=? AND f.sha1 IS NOT NULL "
-                    f"AND NOT f.is_dir AND f.media_id NOT IN ({marks})",
-                    (os.path.basename(path), item.size, *own)):
-                if f["kind"] not in FLOPPY + ("zip", "lha"):
-                    continue          # can't take a single file out of that yet
-                if ix is not None and f["media_id"] not in ix.top:
-                    continue          # added by a scan still running: next time
-                t = ix.info[ix.top[f["media_id"]]] if ix is not None else _top(cat, f["media_id"])
-                item.sources.append(Source(f["media_id"], t["number"] or 0,
-                                           os.path.basename(t["source"].rstrip("/")),
-                                           f["path"], f["sha1"], f["date"] or ""))
-        if item.size and not item.sources:          # found on Aminet earlier (from the cache only)
+        groups = _copies(cat, item.name, item.size, ix).groups_for(item, top_id, own) \
+            if item.size else {}
+        if item.size and not groups:                # found on Aminet earlier (from the cache only)
             for h in aminet.hits(item.name, item.size):
-                item.sources.append(Source(0, 0, "Aminet", h.inner, h.sha1, h.date, online=h.package))
-        _judge(item)
+                _add_source(groups, item, h.sha1, 0, h.date, True, False,
+                            lambda h=h: Source(0, 0, "Aminet", h.inner, h.sha1, h.date,
+                                               online=h.package))
+            item.disks = 1 if groups else 0
+        _judge(item, groups)
+        # only the version picked is ever read: a few of its copies, in case one won't read
+        item.sources = list(groups[item.use.sha1].kept) if item.use is not None else []
         lost.append(item)
     total = cat.db.execute("SELECT COUNT(*) FROM files WHERE media_id=? AND NOT is_dir",
                            (disk["id"],)).fetchone()[0]
@@ -219,28 +292,68 @@ def plan(cat, top_id, ix=None):
                 os.path.basename(top["source"].rstrip("/")), lost, total)
 
 
-def _judge(item):
-    """Pick a replacement and say how sure TurboCAT is."""
-    by_sha = {}
-    for s in item.sources:
-        by_sha.setdefault(s.sha1, []).append(s)
-    item.versions = len(by_sha)
-    if not by_sha:
+# Copies of each version of a lost file kept to read it from (more are tried if one won't read).
+# Every copy is counted, but a common file (devs/system-configuration) can be on 30,000 disks of a
+# big collection: keeping them all took over a gigabyte for 4,000 damaged disks.
+KEEP_COPIES = 8
+
+
+class _Version:
+    """One version (checksum) of a lost file: how often it was found, and a few of its copies."""
+    __slots__ = ("count", "numbers", "n_tops", "same_date", "near_date", "kept", "kept_floppy")
+
+    def __init__(self):
+        self.count = 0
+        self.numbers = set()        # top-level items it is in (counted as it goes, _add_source)
+        self.n_tops = 0             # how many
+        self.same_date = False      # a copy has the lost file's date
+        self.near_date = False      # ... or, from Aminet, its day
+        self.kept = []
+        self.kept_floppy = []       # each kept copy: on a plain disk image (not in an archive)
+
+
+def _add_source(groups, item, sha1, number, date, online, floppy, make):
+    """Count one copy of a lost file; make() gives its Source, called only for the copies kept."""
+    g = groups.get(sha1)
+    if g is None:
+        g = groups[sha1] = _Version()
+    g.count += 1
+    g.numbers.add(number)
+    g.n_tops = len(g.numbers)
+    if item.date and date == item.date:
+        g.same_date = g.near_date = True
+    elif item.date and online and date == item.date[:10]:
+        g.near_date = True
+    if len(g.kept) < KEEP_COPIES:
+        g.kept.append(make())
+        g.kept_floppy.append(floppy)
+    elif floppy and not all(g.kept_floppy):
+        # a plain disk reads quicker than a disk in an archive: it takes the last archive's place
+        i = len(g.kept_floppy) - 1 - g.kept_floppy[::-1].index(False)
+        g.kept[i], g.kept_floppy[i] = make(), True
+
+
+def _judge(item, groups=None):
+    """Pick a replacement and say how sure TurboCAT is. groups: {sha1: _Version}, from plan()."""
+    if groups is None:
+        groups = {}
+        for s in item.sources:
+            _add_source(groups, item, s.sha1, s.number, s.date, bool(s.online), False, lambda s=s: s)
+    item.versions = len(groups)
+    if not groups:
         item.confidence = "none"
         return
-    if len(by_sha) == 1:
-        group = next(iter(by_sha.values()))
-        same_date = item.date and any(s.date == item.date or (s.online and s.date == item.date[:10])
-                                      for s in group)
-        item.use = group[0]
-        item.confidence = "strong" if len({s.number for s in group}) > 1 or same_date else "likely"
+    if len(groups) == 1:
+        g = next(iter(groups.values()))
+        item.use = g.kept[0]
+        item.confidence = "strong" if g.n_tops > 1 or g.near_date else "likely"
         return
-    dated = [g for g in by_sha.values() if item.date and any(s.date == item.date for s in g)]
+    dated = [g for g in groups.values() if g.same_date]
     if len(dated) == 1:                       # the only version with the lost file's date
-        item.use, item.confidence = dated[0][0], "likely"
+        item.use, item.confidence = dated[0].kept[0], "likely"
         return
-    best = max(by_sha.values(), key=len)      # else the version found most often
-    item.use, item.confidence = best[0], "unsure"
+    best = max(groups.values(), key=lambda g: g.count)   # else the version found most often
+    item.use, item.confidence = best.kept[0], "unsure"
 
 
 _plans = {}
