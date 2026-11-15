@@ -5,7 +5,7 @@ Author: David Hill
 What changed in each release, newest first. Work not yet in a numbered release is under
 **Unreleased**.
 
-## Unreleased (for the next beta)
+## 4.0.0-beta.2 — big collections (15 November 2026)
 
 - **Fixed: TurboView listed only 1,771 disks after a 78,000-item scan.** Its copy of the
   catalogue was only rewritten when the picture search finished, which on a big collection takes

@@ -1,7 +1,7 @@
 cask "turbocat" do
   arch arm: "AppleSilicon", intel: "Intel"
 
-  version "4.0.0-beta.1"
+  version "4.0.0-beta.2"
   sha256 arm:   "3650762e59b3d9fa5736906f4116228c026d277ce2a367ad824650790c188f3d",
          intel: "bd87ac644f6682c8d78ae20d939e369347284b8f377e299aa86a022c0616893a"
 

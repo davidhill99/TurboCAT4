@@ -8,7 +8,7 @@ can search your whole collection on the Amiga itself, real or emulated.**
 TurboCAT is the revival of TurboCAT and TurboCAT-Pro, an Amiga disk cataloguer from 1994–1996 by
 David Hill. Version 4 continues the original numbering.
 
-> **Beta.** This is the first public test release (4.0.0-beta.1). Reports of what works and what
+> **Beta.** This is a public test release (4.0.0-beta.2). Reports of what works and what
 > doesn't are very welcome: Help › Report a problem… in TurboCAT, or tcpturbocat@gmail.com.
 
 ## What it does

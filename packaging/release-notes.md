@@ -1,5 +1,21 @@
-**The first public test release of TurboCAT 4**: the 1994–96 Amiga disk cataloguer, back for
+**TurboCAT 4, second public test release**: the 1994–96 Amiga disk cataloguer, back for
 Windows, macOS and Linux, with TurboView to search your collection on a real or emulated Amiga.
+
+## New in beta 2
+
+Mostly for big collections (tried on one of 78,000 items):
+- **Find out about your games**: Tools › Find out about games online… matches your disks to
+  Wikidata's list of Amiga games and shows a few lines from Wikipedia, genre, who made it, the year,
+  and links to Hall of Light, Lemon Amiga and MobyGames.
+- **Background work no longer slows the window down**: the picture search and the game look-up run
+  in processes of their own at the lowest priority, and wait while you're using TurboCAT.
+- **Big catalogues**: open almost three times quicker (with a progress page), use far less memory,
+  close quickly, and no longer freeze or stop with an error during a long scan.
+- **TurboView** is brought up to date straight after each scan (it could list only some of the disks).
+- Smaller fixes: clickable links in the details, the window no longer grows wider than the screen.
+
+Everything that changed: [CHANGELOG.md](https://github.com/davidhill99/TurboCAT4/blob/main/CHANGELOG.md).
+Upgrading from beta 1: just install over it; your catalogue is kept (and backed up first).
 
 *Deutsch: [LIESMICH.md](https://github.com/davidhill99/TurboCAT4/blob/main/LIESMICH.md)*
 
