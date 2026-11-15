@@ -156,7 +156,27 @@ def info_job(db_path, flags, stop, say, progress):
     return res
 
 
-JOBS = {"pictures": picture_job, "info": info_job}
+def turboview_job(db_path, flags, stop, say, progress):
+    """Bring TurboView's copy of the catalogue up to date (right after a scan: it doesn't wait for
+    the picture search, which can take hours on a big collection)."""
+    from . import turboview
+    from .catalogue import Catalogue
+    from .gui import _has_disks, load_items
+    cat = Catalogue(db_path)
+    try:
+        if not _has_disks(cat):          # nothing to list: don't make TurboView's folder yet
+            return {}
+        folder = cat.get_meta("turboview_dir") or turboview.default_folder()
+        items = load_items(cat)
+        if stop():
+            return {"stopped": True}
+        turboview.install(folder)
+        return turboview.export(cat, items, folder)
+    finally:
+        cat.db.close()                   # let go of the file (Windows can't move it otherwise)
+
+
+JOBS = {"pictures": picture_job, "info": info_job, "turboview": turboview_job}
 
 
 class ProcessWorker(QThread):
@@ -247,3 +267,8 @@ class PictureWorker(ProcessWorker):
 class InfoWorker(ProcessWorker):
     """Find out about the games and utilities (gameinfo), alongside the picture search."""
     JOB = "info"
+
+
+class TurboViewWorker(ProcessWorker):
+    """Rewrite TurboView's catalogue files (turboview_job)."""
+    JOB = "turboview"

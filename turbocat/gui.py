@@ -36,7 +36,7 @@ from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
 from . import coverdisks, datlists, folders, gameinfo, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
 from .scanner import BIG_ARCHIVE, recheck, rescan_all, scan
-from .jobs import InfoWorker, PictureWorker
+from .jobs import InfoWorker, PictureWorker, TurboViewWorker
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -3449,29 +3449,6 @@ def _has_disks(cat):
         return True
 
 
-class TurboViewWorker(QThread):
-    """Rewrite TurboView's catalogue files, off the window's thread (it takes a few seconds)."""
-
-    def __init__(self, db_path):
-        super().__init__()
-        self.db_path = db_path
-        self.stop_wanted = False
-
-    def run(self):
-        cat = None
-        try:
-            cat = Catalogue(self.db_path)
-            if not _has_disks(cat):       # nothing to list: don't make TurboView's folder yet
-                return
-            folder = cat.get_meta("turboview_dir") or turboview.default_folder()
-            turboview.export(cat, load_items(cat), folder)
-        except Exception:
-            pass
-        finally:
-            if cat is not None:           # let go of the file (Windows can't delete or move it otherwise)
-                cat.db.close()
-
-
 # The picture search and game details run in processes of their own: see jobs.py
 
 
@@ -5541,11 +5518,14 @@ class MainWindow(QMainWindow):
         self.foot_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         fl.addWidget(self.foot_left, 1)
         fl.addWidget(self.foot_stop, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.foot_info = QLabel()                 # game details, found alongside the pictures
+        # game details, found alongside the pictures. Shortened with … like the line beside it: a
+        # long game title made the window wider than the screen (a plain label insists on room
+        # for all of its text, and the window doesn't shrink back)
+        self.foot_info = ElidedLabel()
         self.foot_info.setObjectName("muted")
         self.foot_info.setFont(ui_font(12))
         self.foot_info.hide()
-        fl.addWidget(self.foot_info, 0, Qt.AlignmentFlag.AlignVCenter)
+        fl.addWidget(self.foot_info, 1, Qt.AlignmentFlag.AlignVCenter)
         # Always in sight: the suggestion box (Help › Suggest an idea…)
         self.idea_link = QLabel(f"<a href='idea' style='color:{C['accent'].name()}; text-decoration:none'>"
                                 "Got an idea?</a>")
@@ -5706,6 +5686,23 @@ class MainWindow(QMainWindow):
             self._fit_to_window()
         self.run_search()
         QTimer.singleShot(1500, self.find_pictures)
+        if self._turboview_behind():
+            QTimer.singleShot(3000, self._update_turboview)
+
+    def _turboview_behind(self):
+        """TurboView's copy lists a different number of items than the catalogue has (a scan
+        finished, or was stopped, before it was brought up to date)."""
+        if not self.all_items:
+            return False                 # nothing to list yet
+        folder = self.cat.get_meta("turboview_dir") or turboview.default_folder()
+        try:
+            with open(os.path.join(folder, "TurboCAT.cat"), encoding="latin-1") as f:
+                f.readline()
+                head = f.readline()
+        except OSError:
+            return False                 # no TurboView yet: it is made after the first scan
+        m = re.search(r"\bITEMS (\d+)", head)
+        return m is None or int(m.group(1)) != len(self.all_items)
 
     def _row_changed(self, current, _previous):
         if not current.isValid():
@@ -6050,9 +6047,9 @@ class MainWindow(QMainWindow):
 
     def _update_turboview(self):
         """Write TurboView's copy of the catalogue (with the favourites), in the background."""
-        if self.tv_worker is not None or self.pic_worker is not None or self.worker is not None:
-            self.tv_timer.start()          # busy: try again shortly
-            return
+        if self.tv_worker is not None or self.worker is not None:
+            self.tv_timer.start()          # busy: try again shortly (the picture search doesn't
+            return                         # hold it up: TurboView would wait hours for that)
         self.tv_worker = TurboViewWorker(self.db_path)
         self.tv_worker.finished.connect(lambda: setattr(self, "tv_worker", None))
         self.tv_worker.start()
@@ -7079,6 +7076,7 @@ class MainWindow(QMainWindow):
         self.act_rescan.setEnabled(True)
         self.details.recheck_btn.setEnabled(True)
         if not self.closing:
+            self._update_turboview()          # TurboView gets the new disks now, not after the pictures
             self.find_pictures()
             if getattr(self, "setup_after_scan", False) and _has_disks(self.cat):
                 self.setup_after_scan = False

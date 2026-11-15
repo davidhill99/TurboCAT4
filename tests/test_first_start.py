@@ -65,8 +65,8 @@ class FirstStartTest(unittest.TestCase):
     def test_no_turboview_folder_while_the_catalogue_is_empty(self):
         folder = os.path.join(self.tmp.name, "TurboCAT-Amiga")
         with mock.patch.object(self.gui.turboview, "default_folder", return_value=folder):
-            worker = self.gui.TurboViewWorker(self.w.db_path)
-            worker.run()
+            from turbocat import jobs          # the job itself, here (it normally runs in a process)
+            jobs.turboview_job(self.w.db_path, {}, lambda: False, print, print)
         self.assertFalse(os.path.exists(folder))
 
 

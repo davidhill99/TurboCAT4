@@ -38,6 +38,8 @@ SCREENS = ("SUPER", "HIGH")
 
 
 def default_folder():
+    if os.environ.get("TURBOCAT_TURBOVIEW_DIR"):     # the tests: never the user's own TurboView
+        return os.environ["TURBOCAT_TURBOVIEW_DIR"]
     base = os.path.expanduser("~/Amiberry")
     return os.path.join(base, "HardDrives", "TurboCAT") if os.path.isdir(base) \
         else os.path.expanduser("~/TurboCAT-Amiga")

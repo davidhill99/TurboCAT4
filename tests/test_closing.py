@@ -17,6 +17,7 @@ class ClosingTest(unittest.TestCase):
 
     def setUp(self):
         from turbocat import gui
+        self.gui = gui
         self.tmp = tempfile.TemporaryDirectory()
         with mock.patch.object(gui.QTimer, "singleShot"):
             self.w = gui.MainWindow(os.path.join(self.tmp.name, "cat.db"))
@@ -73,6 +74,43 @@ class ClosingTest(unittest.TestCase):
         reload.assert_called_once_with(items)
         self.w._info_done({"matched": 3, "texts": 2, "stopped": False})
         self.assertIn("found out about 2 more games", self.w.foot_info.text())
+
+    def test_turboview_behind_the_catalogue_is_noticed(self):
+        """TurboView listed 1,771 disks after a 78,000-item scan: its copy is brought up to date
+        when TurboCAT starts if the count differs."""
+        self.w.all_items = [mock.Mock()]               # one item (an empty catalogue never counts)
+        folder = os.path.join(self.tmp.name, "TV")
+        os.makedirs(folder)
+        self.w.cat.set_meta("turboview_dir", folder)
+        with open(os.path.join(folder, "TurboCAT.cat"), "w") as f:
+            f.write(f"TURBOVIEW 1\nMADE 2026-11-14 20:47\tHOST x\tITEMS {len(self.w.all_items) + 1771}\n")
+        self.assertTrue(self.w._turboview_behind())
+        with open(os.path.join(folder, "TurboCAT.cat"), "w") as f:
+            f.write(f"TURBOVIEW 1\nMADE 2026-11-15 12:00\tHOST x\tITEMS {len(self.w.all_items)}\n")
+        self.assertFalse(self.w._turboview_behind())
+
+    def test_turboview_is_updated_after_a_scan_without_waiting_for_pictures(self):
+        self.w.pic_worker = object()                  # the picture search is running
+        with mock.patch.object(self.gui.TurboViewWorker, "start") as start, \
+                mock.patch.object(self.w, "find_pictures"):
+            self.w._scan_finished()
+        start.assert_called_once()
+        self.w.pic_worker = None
+        self.w.tv_worker = None
+
+    def test_long_status_lines_dont_widen_the_window(self):
+        """A long game title in the status bar made the window wider than the screen."""
+        self.w.resize(1280, 860)
+        self.w.show()
+        self.app.processEvents()
+        before = self.w.minimumSizeHint().width()
+        self.w._info_progress("text", 119, 1471, "Mixed-Up Mother Goose: The Deluxe Multimedia "
+                              "Edition for the Commodore Amiga CD32, with every extra disk")
+        self.w._pic_foot("Looking for pictures and music on disks… inside TOSEC.2016.11.11."
+                         "Commodore.Amiga.AlphaBot Games ADF: 4,701 of 32,788", 4701, 32788)
+        self.app.processEvents()
+        self.assertLessEqual(self.w.minimumSizeHint().width(), before)
+        self.w.hide()
 
 
 if __name__ == "__main__":

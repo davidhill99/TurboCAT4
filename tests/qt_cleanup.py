@@ -3,6 +3,12 @@ any windows the tests left behind, while Qt is still whole: left to Python's own
 destroyed in an order Qt doesn't survive, and the run ends with a crash (exit 139) after "OK"."""
 import atexit
 import gc
+import os
+import tempfile
+
+# TurboView's folder, for these tests and the background processes they start: never the user's own
+# (~/Amiberry/HardDrives/TurboCAT), which a window opening on a test catalogue would otherwise update.
+os.environ.setdefault("TURBOCAT_TURBOVIEW_DIR", os.path.join(tempfile.mkdtemp(prefix="tv-tests-"), "TV"))
 
 
 def _clean_up():

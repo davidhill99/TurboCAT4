@@ -7,6 +7,14 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## Unreleased (for the next beta)
 
+- **Fixed: TurboView listed only 1,771 disks after a 78,000-item scan.** Its copy of the
+  catalogue was only rewritten when the picture search finished, which on a big collection takes
+  hours (and starts again if TurboCAT is closed). It is now brought up to date straight after each
+  scan, in the background, without waiting for the pictures; and when TurboCAT starts, if
+  TurboView lists a different number of items than the catalogue has
+- **Fixed: the window grew wider than the screen** while game details were being found: their
+  line in the status bar wanted room for a whole long game title. It now shortens with …, like
+  the picture search's line beside it
 - **Fixed: links in the details couldn't be clicked** (such as where a picture came from): the
   text could be selected, but the links didn't open
 - **New: find out about your games** (Tools › Find out about games online…, or the link under a
