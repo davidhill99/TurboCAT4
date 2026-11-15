@@ -7,6 +7,14 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## 4.0.0-beta.2 — big collections (15 November 2026)
 
+- **Fixed: pictures found online didn't show, and every start looked all the disks up online
+  again.** A picture found in the libretro collection was saved under the name it matched (such
+  as "darkseed") instead of against the disk, and a disk with no match was never marked as looked
+  up. On a 78,000-item collection 2,484 pictures were found but never shown, and about 60,000
+  disks were looked up again at each start. Pictures go to their disks now; the misfiled ones are
+  cleared once and found again
+- **Look online again… looks up just that disk** (or that set's disks), in a few seconds, instead
+  of starting the online search for the whole catalogue
 - **Fixed on Windows: the details panel failed for every scanned disk** (nothing showed when
   a disk was picked), and so did the "Catalogue of …" date in the status bar and the Safety copies
   line in Help › About: the date was written in a way only Linux and macOS understand

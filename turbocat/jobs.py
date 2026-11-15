@@ -49,7 +49,7 @@ def _lowest_priority():
             pass
 
 
-def _child(job, db_path, flags, stop_event, last_input, conn):
+def _child(job, db_path, flags, stop_event, last_input, conn, args=()):
     """The process's whole life: run one job, reporting through conn."""
     _lowest_priority()
     background.attach(last_input)
@@ -60,7 +60,7 @@ def _child(job, db_path, flags, stop_event, last_input, conn):
         background.pace(stop)
         progress(*a)
     try:
-        res = JOBS[job](db_path, flags, stop, say, progress)
+        res = JOBS[job](db_path, flags, stop, say, progress, *args)
         conn.send(("done", res))
     except Exception as ex:
         traceback.print_exc()
@@ -176,7 +176,24 @@ def turboview_job(db_path, flags, stop, say, progress):
         cat.db.close()                   # let go of the file (Windows can't move it otherwise)
 
 
-JOBS = {"pictures": picture_job, "info": info_job, "turboview": turboview_job}
+def online_again_job(db_path, flags, stop, say, progress, ids):
+    """Look online again for these items only (the details panel's Look online again…)."""
+    from . import identify, pictures
+    from .catalogue import Catalogue
+    cat = Catalogue(db_path)
+    try:
+        try:
+            known = {k: v[0] for k, v in identify.for_catalogue(cat).items() if k in set(ids)}
+        except Exception:
+            known = {}
+        return pictures.lookup_online(cat, lambda i, n, m: progress("online-again", i, n, _name(m)),
+                                      stop, known=known, only=ids)
+    finally:
+        cat.db.close()
+
+
+JOBS = {"pictures": picture_job, "info": info_job, "turboview": turboview_job,
+        "online-again": online_again_job}
 
 
 class ProcessWorker(QThread):
@@ -187,9 +204,10 @@ class ProcessWorker(QThread):
     JOB = ""
     FLAGS = ()
 
-    def __init__(self, db_path, **flags):
+    def __init__(self, db_path, args=(), **flags):
         super().__init__()
         self.db_path = db_path
+        self.args = tuple(args)          # passed on to the job after its usual ones
         self._ctx = multiprocessing.get_context("spawn")     # a fresh process: no copy of the window
         self._stop = self._ctx.Event()
         self._flags = {f: self._ctx.Value("b", bool(flags.get(f, False))) for f in self.FLAGS}
@@ -214,7 +232,7 @@ class ProcessWorker(QThread):
         receive, send = self._ctx.Pipe(duplex=False)
         proc = self._ctx.Process(
             target=_child, args=(self.JOB, self.db_path, self._flags, self._stop,
-                                 background.shared_last_input(), send),
+                                 background.shared_last_input(), send, self.args),
             daemon=True, name=f"turbocat-{self.JOB}")
         try:
             proc.start()
@@ -267,6 +285,14 @@ class PictureWorker(ProcessWorker):
 class InfoWorker(ProcessWorker):
     """Find out about the games and utilities (gameinfo), alongside the picture search."""
     JOB = "info"
+
+
+class OnlineAgainWorker(ProcessWorker):
+    """Look online again for the pictures of a few items (online_again_job)."""
+    JOB = "online-again"
+
+    def __init__(self, db_path, ids):
+        super().__init__(db_path, args=(list(ids),))
 
 
 class TurboViewWorker(ProcessWorker):

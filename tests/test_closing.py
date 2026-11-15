@@ -112,6 +112,22 @@ class ClosingTest(unittest.TestCase):
         self.assertLessEqual(self.w.minimumSizeHint().width(), before)
         self.w.hide()
 
+    def test_look_online_again_is_for_the_item_shown_only(self):
+        item = mock.Mock(members=(), id=7, pic="")
+        self.w.details.item = item
+        self.w.cat.set_meta("online_pictures", True)
+        with mock.patch.object(self.gui, "OnlineAgainWorker") as W, \
+                mock.patch.object(self.w, "find_pictures") as everything:
+            self.w.online_again()
+        W.assert_called_once_with(self.w.db_path, [7])
+        everything.assert_not_called()
+        self.w.again_worker = None
+        item.members = (7, 8, 9)                          # a set: its disks
+        with mock.patch.object(self.gui, "OnlineAgainWorker") as W:
+            self.w.online_again()
+        W.assert_called_once_with(self.w.db_path, [7, 8, 9])
+        self.w.again_worker = None
+
 
 if __name__ == "__main__":
     unittest.main()

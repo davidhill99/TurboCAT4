@@ -36,7 +36,7 @@ from .bootblock import best_title
 from .catalogue import Catalogue, matches, search_words
 from . import coverdisks, datlists, folders, gameinfo, magcovers, dups as dupes, favourites as favs, identify, setup as setupcheck, sets as disksets, utilities, versions as vers, emulator, games, gotek, music, pictures, turboview
 from .scanner import BIG_ARCHIVE, recheck, rescan_all, scan
-from .jobs import InfoWorker, PictureWorker, TurboViewWorker
+from .jobs import InfoWorker, OnlineAgainWorker, PictureWorker, TurboViewWorker
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -5463,7 +5463,7 @@ class MainWindow(QMainWindow):
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(1, 1, 1, 1)
         pl.addWidget(self.stack)
-        self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek, self.find_online,
+        self.details = DetailsPanel(self.cat, self.select_number, self.copy_to_gotek, self.online_again,
                                     self.play_music, self.play_in_emulator)
         self.details.on_keep = self.keep_copy
         self.details.on_favourite = self.toggle_favourite
@@ -5578,6 +5578,7 @@ class MainWindow(QMainWindow):
 
         self.pic_worker = None
         self.info_worker = None                 # finding out about games (jobs.InfoWorker)
+        self.again_worker = None                # Look online again… for one item (jobs.OnlineAgainWorker)
         self.pic_refresh = QTimer(self, interval=8000)   # show pictures as they are found
         self.pic_refresh.timeout.connect(self._refresh_pictures)
         self._fill_counts()
@@ -7197,6 +7198,56 @@ class MainWindow(QMainWindow):
             return
         self.find_pictures(online=True, asked=True)
 
+    def online_again(self):
+        """The details panel's Look online again…: this item only (all its disks, for a set), not
+        the whole catalogue."""
+        item = self.details.item
+        if item is None:
+            return
+        if not self.cat.get_meta("online_pictures", False):
+            self.find_online()                   # asks first; then looks up every disk
+            return
+        if self.again_worker is not None:
+            return
+        ids = list(item.members) or [item.id]
+        self.details.pic_caption.setText("Looking online for a picture of this one…")
+        w = self.again_worker = OnlineAgainWorker(self.db_path, ids)
+        w.done.connect(lambda res, item=item: self._online_again_done(item, res))
+        w.failed.connect(lambda msg, item=item: self._online_again_done(item, {"error": msg}))
+        w.finished.connect(self._online_again_finished)
+        w.start()
+
+    def _online_again_finished(self):
+        self.again_worker = None
+        if self.closing:
+            self._close_when_idle()
+
+    def _online_again_done(self, item, res):
+        if self.closing:
+            return
+        ids = set(item.members or (item.id,))
+        found = None
+        for it in self.all_items:
+            if it.id not in ids or it.members:
+                continue
+            th = self.cat.db.execute("SELECT * FROM thumbs WHERE key=?", (it.key,)).fetchone()
+            if th is not None and th["pic"] and th["origin"] == "online":
+                it.pic, it.pic_from, it.pic_origin = (pictures.picture_path(th["pic"]) or "",
+                                                      th["pic_from"] or "", "online")
+                found = found or it
+        if found is not None and not item.pic:
+            item.pic, item.pic_from, item.pic_origin = found.pic, found.pic_from, found.pic_origin
+            n = self.model.rowCount()
+            if n:
+                self.model.dataChanged.emit(self.model.index(0, 0), self.model.index(n - 1, len(COLUMNS) - 1))
+        if self.details.item is item:
+            self.details.show_item(item)
+            if found is None:
+                why = (" (couldn't reach it: " + _esc(res["error"]) + ")") if res.get("error") else ""
+                self.details.pic_caption.setText(
+                    "Looked online again: the picture collection has nothing under this game's "
+                    f"names{why}. <a href='#online'>Look online again…</a>")
+
     def find_info(self):
         """Tools > Find out about games online: ask once, then look up in the background (and after
         every scan from then on)."""
@@ -7559,6 +7610,7 @@ class MainWindow(QMainWindow):
         return " and ".join(w for w, t in (("the scan", self.worker), ("the picture search", self.pic_worker),
                                            ("finding out about games", getattr(self, "info_worker", None)),
                                            ("updating TurboView", getattr(self, "tv_worker", None)),
+                                           ("looking online", getattr(self, "again_worker", None)),
                                            ("the repairs", getattr(self, "repairer", None)),
                                            ("the Aminet look-up", getattr(self, "aminet_worker", None)))
                             if t is not None)
@@ -7581,7 +7633,7 @@ class MainWindow(QMainWindow):
             return
         event.ignore()
         for t in (self.worker, self.pic_worker, getattr(self, "info_worker", None), self.tv_worker,
-                  getattr(self, "repairer", None),
+                  getattr(self, "again_worker", None), getattr(self, "repairer", None),
                   getattr(self, "aminet_worker", None)):
             if t is not None:
                 t.stop_wanted = True

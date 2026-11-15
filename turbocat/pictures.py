@@ -600,15 +600,34 @@ def item_titles(cat, m):
     return out
 
 
+def _forget_misfiled(cat):
+    """Up to 4.0.0-beta.2 a picture found online was saved under the name it matched ("darkseed")
+    instead of the disk's key, and a disk with no match was never marked as looked up: so the
+    pictures never showed, and every start looked all those disks up again. Such rows belong to
+    no disk: remove them, and the disks are looked up once more, properly."""
+    if cat.get_meta("thumbs_misfiled_gone", False):
+        return 0
+    keys = {item_key(m) for m in cat.db.execute("SELECT sha1, source FROM media")}
+    stray = [(r[0],) for r in cat.db.execute("SELECT key FROM thumbs WHERE origin='online' AND pic IS NOT NULL")
+             if r[0] not in keys]
+    cat.db.executemany("DELETE FROM thumbs WHERE key=?", stray)
+    cat.set_meta("thumbs_misfiled_gone", True)
+    cat.db.commit()
+    return len(stray)
+
+
 ONLINE_RULES = 2     # bump when the matching improves, so disks not found before are tried again
 
 
-def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=None):
+def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=None, only=None):
     """For items without a picture of their own, fetch one from libretro-thumbnails.
     known: {top id: proper name} for disks identified by checksum: their real titles are tried
-    first, and they are looked up again even if their file name found nothing before."""
+    first, and they are looked up again even if their file name found nothing before.
+    only: ids of the items to look up (again), whatever was found before (Look online again…)."""
     known = known or {}
     ensure_schema(cat)
+    if only is None:
+        _forget_misfiled(cat)
     if progress:
         progress(0, 0, None)          # 0 of 0: fetching the list of pictures (a few MB, cached)
     try:
@@ -618,9 +637,17 @@ def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=Non
     thumbs = thumbs_by_key(cat)
     retry = cat.get_meta("online_rules", 1) < ONLINE_RULES      # better matching since last time
     todo = []
-    for m in cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number"):
+    if only is not None:
+        ids = sorted(set(only))
+        rows = cat.db.execute(f"SELECT * FROM media WHERE id IN ({','.join('?' * len(ids))})", ids)
+        force = True
+    else:
+        rows = cat.db.execute("SELECT * FROM media WHERE parent_id IS NULL ORDER BY number")
+    for m in rows:
         t = thumbs.get(item_key(m))
-        if t is not None and t["pic"]:
+        if t is not None and t["pic"] and t["origin"] != "online":
+            continue                         # a picture of its own, from the disk
+        if t is not None and t["pic"] and only is None:
             continue
         if t is not None and t["online"] and not (force or retry) and m["id"] not in known:
             continue
@@ -642,8 +669,8 @@ def lookup_online(cat, progress=None, stop=lambda: False, force=False, known=Non
         titles = item_titles(cat, m)
         if m["id"] in known:
             titles = [clean_title(known[m["id"]])] + titles
-        for key in [normal(n) for n in titles] + ["~" + loose(n) for n in titles]:
-            slot = index.get(key)
+        for name_key in [normal(n) for n in titles] + ["~" + loose(n) for n in titles]:
+            slot = index.get(name_key)
             if slot:
                 match = (titles[0], next(slot[f] for f in LR_ORDER if f in slot))
                 break
