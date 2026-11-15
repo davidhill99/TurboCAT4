@@ -7,6 +7,9 @@ What changed in each release, newest first. Work not yet in a numbered release i
 
 ## 4.0.0-beta.2 — big collections (15 November 2026)
 
+- **Fixed on Windows: the details panel failed for every scanned disk** (nothing showed when
+  a disk was picked), and so did the "Catalogue of …" date in the status bar and the Safety copies
+  line in Help › About: the date was written in a way only Linux and macOS understand
 - **Fixed: TurboView listed only 1,771 disks after a 78,000-item scan.** Its copy of the
   catalogue was only rewritten when the picture search finished, which on a big collection takes
   hours (and starts again if TurboCAT is closed). It is now brought up to date straight after each

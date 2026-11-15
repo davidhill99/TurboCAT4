@@ -115,6 +115,24 @@ class SticksTest(unittest.TestCase):
         self.assertEqual(gotek._sticks_from(self.VOLUMES[4:], "mac"), [("/Volumes/GOTEK", "GOTEK", 10**9)])
 
 
+class DatesTest(unittest.TestCase):
+    def test_dates_are_written_without_unix_only_codes(self):
+        # strftime's %-d (day without a leading 0) is Linux and macOS only: on Windows it raised
+        # ValueError, and the details panel failed for every scanned disk
+        import re
+        import time
+        here = os.path.join(os.path.dirname(__file__), "..", "turbocat")
+        for name in os.listdir(here):
+            if name.endswith(".py"):
+                with open(os.path.join(here, name), encoding="utf-8") as f:
+                    for n, line in enumerate(f, 1):
+                        if "strftime" in line:
+                            self.assertNotRegex(line, r"%[-#]", f"{name}:{n}")
+        from turbocat.gui import when
+        t = time.mktime((2026, 11, 5, 14, 3, 0, 0, 0, -1))
+        self.assertEqual(re.sub(r"[A-Za-z]+", "Mon", when(t)), "5 Mon 2026, 14:03")
+
+
 class FolderCaseTest(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("win"), "Windows ignores case in folder names")
     def test_windows_ignores_case(self):

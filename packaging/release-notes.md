@@ -12,6 +12,7 @@ Mostly for big collections (tried on one of 78,000 items):
 - **Big catalogues**: open almost three times quicker (with a progress page), use far less memory,
   close quickly, and no longer freeze or stop with an error during a long scan.
 - **TurboView** is brought up to date straight after each scan (it could list only some of the disks).
+- **Windows**: picking a disk now shows its details (in beta 1 the details panel failed).
 - Smaller fixes: clickable links in the details, the window no longer grows wider than the screen.
 
 Everything that changed: [CHANGELOG.md](https://github.com/davidhill99/TurboCAT4/blob/main/CHANGELOG.md).

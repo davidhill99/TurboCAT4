@@ -1111,6 +1111,12 @@ def _home_short(path):
     return "~" + path[len(home):] if folders.within(path, home) else path
 
 
+def when(t):
+    """A time as '5 Nov 2026, 14:03'. (The day without a leading 0 by hand: Windows has no code for it.)"""
+    lt = time.localtime(t)
+    return f"{lt.tm_mday} {time.strftime('%b %Y, %H:%M', lt)}"
+
+
 def _wrap_label(text="", font=None, obj=None):
     lab = WrapLabel(text)
     lab.setWordWrap(True)
@@ -2551,7 +2557,7 @@ class DetailsPanel(QFrame):
                 "empty": ("Empty — no disk data", None, "ink-soft")}.get(status, (status, None, "ink"))
         self._set_fact("Status", word[0], word[1], C[word[2]])
         self._set_fact("Size", _size(m["size"]))
-        self._set_fact("Scanned", time.strftime("%-d %b %Y, %H:%M", time.localtime(m["scanned_at"]))
+        self._set_fact("Scanned", when(m["scanned_at"])
                        if m["scanned_at"] else "—")
         self._layout_facts()
 
@@ -5039,7 +5045,7 @@ class AboutDialog(QDialog):
         self.backup_dir = catalogue_mod.backup_folder(db_path)
         copies = catalogue_mod.backups(db_path)
         if copies:
-            newest = time.strftime("%-d %b %Y, %H:%M", time.localtime(copies[0][1]))
+            newest = when(copies[0][1])
             row(g, "Safety copies", f"{len(copies)} cop{'y' if len(copies) == 1 else 'ies'}, newest {newest}\n{self.backup_dir}")
         else:
             row(g, "Safety copies", "None yet: one is made when TurboCAT next starts", muted=True)
@@ -7623,7 +7629,7 @@ class MainWindow(QMainWindow):
         last = self.cat.db.execute("SELECT MAX(scanned_at) FROM media").fetchone()[0]
         bits = []
         if last:
-            bits.append("Catalogue of " + time.strftime("%-d %b %Y, %H:%M", time.localtime(last)))
+            bits.append("Catalogue of " + when(last))
         self.foot_left.setText(" · ".join(bits))
         self._show_total()
 
